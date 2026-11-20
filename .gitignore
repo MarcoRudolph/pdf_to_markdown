@@ -46,3 +46,21 @@ next-env.d.ts
 .eslintcache
 .turbo
 .swc
+
+# Python API: local environments, caches and generated artifacts
+/API/.venv/
+**/__pycache__/
+**/.pytest_cache/
+*.py[cod]
+.coverage*
+htmlcov/
+/API/*.pdf
+/API/*.markdown
+/API/document.md
+/API/tests/*.pdf
+/API/tests/*.md
+
+# Local secrets and task workspace (keep example templates tracked)
+.env.*
+!.env.example
+.superpowers/
