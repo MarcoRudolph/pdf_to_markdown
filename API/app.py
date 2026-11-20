@@ -9,7 +9,9 @@ from tempfile import TemporaryDirectory
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
+from python_multipart.exceptions import MultipartParseError
 from starlette.datastructures import UploadFile
+from starlette.exceptions import HTTPException as StarletteHTTPException
 import pymupdf
 
 from transcriber import transcribe
@@ -83,7 +85,11 @@ async def convert(request: Request):
     try:
         try:
             form = await request.form()
-        except Exception:
+        except StarletteHTTPException as exc:
+            if exc.status_code != 400:
+                raise
+            raise HTTPException(400, "Invalid multipart upload") from None
+        except MultipartParseError:
             raise HTTPException(400, "Invalid multipart upload") from None
         try:
             upload = form.get("file")

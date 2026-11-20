@@ -69,6 +69,18 @@ def test_malformed_multipart_is_400(client):
     assert response.status_code == 400
 
 
+def test_multipart_parser_infrastructure_failure_is_redacted_500(client, monkeypatch):
+    async def fail_to_parse(_parser):
+        raise OSError(28, "No space left on device: internal-secret-path")
+
+    monkeypatch.setattr(MultiPartParser, "parse", fail_to_parse)
+    response = upload(client, pdf_bytes("Private customer text"))
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal conversion error"}
+    assert "internal-secret-path" not in response.text
+    assert "Private customer text" not in response.text
+
+
 @pytest.mark.parametrize("content,mime", [(b"not pdf", "application/pdf"), (b"%PDF- fake", "text/plain")])
 def test_invalid_mime_or_pdf_signature_is_400(client, content, mime):
     assert upload(client, content, mime=mime).status_code == 400
