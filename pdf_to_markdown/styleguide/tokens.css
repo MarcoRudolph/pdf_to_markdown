@@ -1,0 +1,35 @@
+/* Quincy QCheckIn: Figma-derived design tokens. See STYLEGUIDE.md for provenance. */
+:root {
+  --qc-surface: #ffffff;
+  --qc-ink: #0e0e2c;
+  --qc-muted: #475569;
+  --qc-primary: #3b3ddd;
+  --qc-illustration-ink: #4f46e5;
+  --qc-illustration-bg: #eef2ff;
+  --qc-selected-ink: #3730a3;
+  --qc-control-muted: #64748b;
+  --qc-input-border: #8796ab;
+  --qc-divider: #e2e8f0;
+  --qc-disabled-bg: #f8fafc;
+  --qc-disabled-ink: #cbd5e1;
+  --qc-success-bg: #ecfdf5;
+  --qc-success-ink: #10b981;
+  --qc-icon-dark: #1e293b;
+
+  --qc-header-surface: rgb(255 255 255 / 70%);
+  --qc-footer-surface: rgb(255 255 255 / 60%);
+
+  --qc-header-height: 64px;
+  --qc-header-with-progress-height: 84px;
+  --qc-footer-height: 80px;
+  --qc-content-max-width: 704px;
+  --qc-content-side-padding: 32px;
+  --qc-content-top-padding: 40px;
+
+  --qc-radius-input: 6px;
+  --qc-radius-chip: 8px;
+  --qc-radius-button: 12px;
+  --qc-radius-card: 16px;
+
+  --qc-touch-target-min: 44px;
+}
