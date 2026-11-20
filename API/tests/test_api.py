@@ -5,6 +5,8 @@ from io import BytesIO
 import pymupdf
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartParser
 
 from app import app
 
@@ -126,6 +128,32 @@ def test_temp_files_removed_after_success_and_error(client, monkeypatch, tmp_pat
     assert list(tmp_path.iterdir()) == []
     assert upload(client, b"%PDF-1.7\nbroken").status_code == 422
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("outcome", ["success", "invalid_pdf", "unexpected_error"])
+def test_multipart_upload_handle_closed_after_response(client, monkeypatch, outcome):
+    # Observe the real multipart parser's UploadFile, not the client-side BytesIO.
+    parsed_files = []
+    original_parse = MultiPartParser.parse
+
+    async def capture_parsed_file(parser):
+        form = await original_parse(parser)
+        parsed_file = form["file"]
+        assert isinstance(parsed_file, UploadFile)
+        parsed_files.append(parsed_file.file)
+        return form
+
+    monkeypatch.setattr(MultiPartParser, "parse", capture_parsed_file)
+    if outcome == "unexpected_error":
+        def crash(_path):
+            raise RuntimeError("conversion failed")
+        monkeypatch.setattr("app.transcribe", crash)
+
+    content = b"%PDF-1.7\nbroken" if outcome == "invalid_pdf" else pdf_bytes("Readable content")
+    response = upload(client, content)
+    assert response.status_code == {"success": 200, "invalid_pdf": 422, "unexpected_error": 500}[outcome]
+    assert len(parsed_files) == 1
+    assert parsed_files[0].closed
 
 
 def test_unexpected_error_is_redacted(client, monkeypatch, tmp_path):

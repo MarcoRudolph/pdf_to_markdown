@@ -85,19 +85,22 @@ async def convert(request: Request):
             form = await request.form()
         except Exception:
             raise HTTPException(400, "Invalid multipart upload") from None
-        upload = form.get("file")
-        if not isinstance(upload, UploadFile):
-            raise HTTPException(400, "Missing PDF upload")
-        if upload.content_type != "application/pdf":
-            raise HTTPException(400, "Expected application/pdf")
-        markdown = await run_in_threadpool(
-            _convert, upload, request.app.state.max_upload_bytes, request.app.state.max_pages
-        )
-        return Response(
-            markdown,
-            media_type="text/markdown; charset=utf-8",
-            headers={"Content-Disposition": 'attachment; filename="document.md"'},
-        )
+        try:
+            upload = form.get("file")
+            if not isinstance(upload, UploadFile):
+                raise HTTPException(400, "Missing PDF upload")
+            if upload.content_type != "application/pdf":
+                raise HTTPException(400, "Expected application/pdf")
+            markdown = await run_in_threadpool(
+                _convert, upload, request.app.state.max_upload_bytes, request.app.state.max_pages
+            )
+            return Response(
+                markdown,
+                media_type="text/markdown; charset=utf-8",
+                headers={"Content-Disposition": 'attachment; filename="document.md"'},
+            )
+        finally:
+            await form.close()
     except HTTPException:
         raise
     except Exception:
