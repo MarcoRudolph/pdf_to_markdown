@@ -25,7 +25,7 @@ a bearer authorization header and a multipart `file` part with
 attachment `document.md`. For example, after setting `API_TOKEN` in your shell:
 
 ```bash
-curl -fsS -H "$(printf 'Authorization: Bearer %s' "$API_TOKEN")" \
+curl -fsS -H "Authorization: Bearer ${API_TOKEN}" \
   -F 'file=@sample.pdf;type=application/pdf' \
   http://127.0.0.1:8000/v1/convert -o document.md
 ```
