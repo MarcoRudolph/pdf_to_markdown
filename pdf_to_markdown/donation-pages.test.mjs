@@ -80,6 +80,18 @@ test('Pages status checks Stripe for paid and unpaid sessions, rejects malformed
   assert.equal(calls.length, 0);
 });
 
+test('Pages status rejects malformed or non-HTTPS configured origins before contacting Stripe', async () => {
+  for (const configured of ['https://example.com/path', 'https://example.com?x=1', 'https://example.com:bad', 'http://example.com']) {
+    const { response, data, calls } = await call('status', 'GET', {
+      query: `?session_id=${sessionId}`, config: { ...env, DONATION_ORIGIN: configured },
+    });
+    assert.equal(response.status, 503, configured);
+    assert.deepEqual(data, { error: 'Donations unavailable' });
+    headers(response);
+    assert.equal(calls.length, 0, configured);
+  }
+});
+
 test('Pages routes reject unsupported methods including OPTIONS with Allow and privacy headers', async () => {
   for (const [route, method, allow] of [['post', 'OPTIONS', 'POST'], ['post', 'GET', 'POST'], ['status', 'OPTIONS', 'GET'], ['status', 'POST', 'GET']]) {
     const { response, calls } = await call(route, method, { ...(method === 'POST' ? { body: '{}' } : {}) });

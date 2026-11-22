@@ -4,7 +4,7 @@ const headers = { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' 
 function json(status, value, extra = {}) {
   return Response.json(value, { status, headers: { ...headers, ...extra } });
 }
-function configuredOrigin(value) {
+export function configuredOrigin(value) {
   if (typeof value !== 'string') return null;
   try {
     const url = new URL(value);
