@@ -22,7 +22,7 @@ const copy = {
 export function donationLocale(languages) {
   const first = (Array.isArray(languages) ? languages[0] : languages) || navigator.language || 'en';
   const subtags = first.split('-');
-  const region = subtags.find((part) => /^[A-Za-z]{2}$/.test(part) && part !== subtags[0]);
+  const region = subtags.slice(1).find((part) => /^(?:[A-Za-z]{2}|[0-9]{3})$/.test(part));
   if (region) return ['DE', 'AT', 'CH', 'LI'].includes(region.toUpperCase()) ? 'de' : 'en';
   return subtags[0].toLowerCase() === 'de' ? 'de' : 'en';
 }

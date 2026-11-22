@@ -1,5 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import DonationModal, { donationLocale } from './DonationModal';
 
 const germanCopy = 'Hi uch bin Marco und betreibe ein Einzelunternehmen. Ich bin mit meiner Family ständig in den roten Zahlen. Eure Donation würde also meinen 2 Kids, meiner Frau und mir sehr helfen. Vielen Dank';
@@ -19,8 +21,41 @@ test.each([
   [['de-DE'], 'de'], [['en-DE'], 'de'], [['de-AT'], 'de'], [['fr-CH'], 'de'],
   [['de-CH'], 'de'], [['de-LI'], 'de'], [['en-US'], 'en'], [['fr-FR'], 'en'],
   [['de-US'], 'en'], [['de'], 'de'], [['en-US', 'de-DE'], 'en'],
+  [['de-419'], 'en'], [['de-Latn-419'], 'en'],
 ])('first browser locale %j resolves to %s', (languages, expected) => {
   expect(donationLocale(languages)).toBe(expected);
+});
+
+test('dialog own sizing rule includes padding and border within viewport width and height limits', () => {
+  // Isolate the dialog rule: the global * reset must not mask a missing dialog box-sizing.
+  const source = readFileSync(join(__dirname, 'App.css'), 'utf8');
+  const stylesheet = document.createElement('style');
+  stylesheet.textContent = source;
+  document.head.appendChild(stylesheet);
+  try {
+    const rule = Array.from(stylesheet.sheet.cssRules).find((entry) => entry.selectorText === '.donation-modal');
+    expect(rule).toBeDefined();
+    const isolated = document.createElement('style');
+    isolated.textContent = rule.cssText;
+    document.head.appendChild(isolated);
+    const dialog = document.createElement('dialog');
+    dialog.className = 'donation-modal';
+    document.body.appendChild(dialog);
+    try {
+      // Remove global styles; only the dialog's own declaration should set sizing.
+      stylesheet.remove();
+      const computed = getComputedStyle(dialog);
+      expect(computed.boxSizing).toBe('border-box');
+      // JSDOM cannot compute min()/dvh; retain the parsed viewport constraints.
+      expect(rule.style.getPropertyValue('width')).toBe('min(520px, calc(100vw - 32px))');
+      expect(rule.style.getPropertyValue('max-height')).toBe('calc(100dvh - 32px)');
+    } finally {
+      dialog.remove();
+      isolated.remove();
+    }
+  } finally {
+    stylesheet.remove();
+  }
 });
 
 test('missing language list falls back to navigator.language', () => {

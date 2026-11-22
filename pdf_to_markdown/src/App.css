@@ -58,7 +58,7 @@ input[type='file']:disabled { cursor: not-allowed; background: var(--qc-disabled
 .legal a { display: inline-flex; align-items: center; min-height: 44px; }
 .back-link { display: inline-flex; align-items: center; min-height: 44px; }
 .legal-note { padding: 16px; border: 1px solid var(--qc-divider); border-radius: var(--qc-radius-chip); background: var(--qc-disabled-bg); }
-.donation-modal { position: fixed; width: min(520px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 32px); overflow-y: auto; border: 1px solid var(--qc-divider); border-radius: var(--qc-radius-card); padding: 28px; color: var(--qc-ink); background: var(--qc-surface); box-shadow: 0 16px 48px rgba(0, 0, 0, .18); }
+.donation-modal { position: fixed; box-sizing: border-box; width: min(520px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 32px); overflow-y: auto; border: 1px solid var(--qc-divider); border-radius: var(--qc-radius-card); padding: 28px; color: var(--qc-ink); background: var(--qc-surface); box-shadow: 0 16px 48px rgba(0, 0, 0, .18); }
 .donation-modal::backdrop { background: rgba(0, 0, 0, .55); }
 .donation-modal h2 { margin: 0 52px 16px 0; }
 .donation-modal p { line-height: 1.55; }
