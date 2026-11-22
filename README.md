@@ -1,5 +1,41 @@
-# pdf_to_markdown
-webapp for pdf transcription service
+# PDF to Markdown
+
+Eine Webanwendung, die **textbasierte PDF-Dateien in Markdown** umwandelt. Die
+[Landing Page ansehen](https://pdf-to-markdown-8xk.pages.dev/).
+
+## Was die Anwendung kann
+
+- PDF mit vorhandener Textebene hochladen und den extrahierten Text als
+  `document.md` herunterladen; **keine OCR** für eingescannte Seiten.
+- Upload-Fortschritt, Verarbeitungsstatus und verständliche Fehlermeldungen
+  anzeigen. Erneuter Versuch mit derselben oder einer anderen Datei ist möglich.
+- Dateien auf **10 MiB** und **100 Seiten** begrenzen (die Seitenzahl prüft die API).
+- Impressum und Datenschutzerklärung anzeigen. Der Donate-Button ist derzeit
+  deaktiviert.
+
+**Stand der öffentlichen Seite:** Cloudflare Pages liefert derzeit nur das
+statische Frontend. Der Upload funktioniert dort **noch nicht**, weil der
+Node-Proxy und die Python-API nicht öffentlich angebunden sind. Lokal kann die
+vollständige Konvertierung mit beiden Diensten betrieben werden. Die Rechtstexte
+sind Entwürfe und vor einem öffentlichen Produktivbetrieb zu prüfen.
+
+## Technologie und Aufbau
+
+- **Frontend:** React 19, JavaScript, CSS und Create React App (`react-scripts`).
+  Der Browser sendet Uploads an den gleichursprünglichen Pfad `/v1/convert`.
+- **Proxy:** Node.js mit eingebautem `http`-Modul (`pdf_to_markdown/server.cjs`).
+  Er liefert lokal das gebaute Frontend aus und leitet Uploads an die API weiter.
+  Der API-Bearer-Token bleibt ausschließlich auf dem Server.
+- **API:** Python 3.11, FastAPI und Uvicorn (`API/`). Sie validiert Uploads und
+  wandelt die vorhandene PDF-Textebene mit **PyMuPDF** in Markdown um. PDFs
+  werden nur temporär für die Verarbeitung gespeichert und danach entfernt.
+- **Deployment der Vorschauseite:** Statischer React-Build auf Cloudflare Pages;
+  derzeit ohne den Node-/Python-Dienst.
+- **Tests:** React Testing Library/Jest, Node.js-Test-Runner und pytest.
+
+Quellcode und Details: [`pdf_to_markdown/README.md`](pdf_to_markdown/README.md)
+für Website und lokalen Start, [`API/README.md`](API/README.md) für API und
+Betriebsgrenzen.
 
 ## Lizenz
 
