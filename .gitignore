@@ -64,3 +64,6 @@ htmlcov/
 .env.*
 !.env.example
 .superpowers/
+
+# Rollback snapshots of external project sources (must not go public)
+/pdf_to_markdown/styleguide/drafts/rollback/
