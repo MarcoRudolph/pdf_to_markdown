@@ -51,12 +51,24 @@ for (const amountCents of [0, 499, 501, 50001, '1000', NaN, 500.5, Infinity]) {
 }
 for (const changes of [
   { locale: 'fr' }, { locale: 'EN' }, { origin: 'https://example.org/path' },
-  { origin: 'http://example.org' }, { origin: 'not-a-url' },
-  { origin: 'https://example.org/?x=1' }, { origin: 'https://user:pass@example.org' },
+  { origin: 'http://example.org' }, { origin: 'http://example.org:443' }, { origin: 'not-a-url' },
+  { origin: 'https://example.org:443/path' }, { origin: 'https://example.org/?x=1' },
+  { origin: 'https://user:pass@example.org' }, { origin: 'https://user:pass@example.org:443' },
   { currency: 'usd' },
 ]) {
   test(`rejects untrusted checkout input ${JSON.stringify(changes)}`, async () => {
     await assert.rejects(createDonationCheckout({ ...base, ...changes, fetchImpl: mustNotFetch }), isError(400));
+  });
+}
+for (const origin of ['https://example.org:443', 'https://example.org:443/']) {
+  test(`normalizes explicit default HTTPS port in origin ${origin}`, async () => {
+    const result = await createDonationCheckout({ ...base, origin, fetchImpl: async (_, init) => {
+      const form = new URLSearchParams(init.body);
+      assert.equal(form.get('success_url'), 'https://example.org/?donation=success&session_id={CHECKOUT_SESSION_ID}');
+      assert.equal(form.get('cancel_url'), 'https://example.org/?donation=cancel');
+      return response({ url: checkoutUrl });
+    } });
+    assert.deepEqual(result, { url: checkoutUrl });
   });
 }
 test('permits explicitly loopback HTTP origin', async () => {

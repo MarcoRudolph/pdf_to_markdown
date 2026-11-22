@@ -26,7 +26,8 @@ function normalizeOrigin(origin) {
     if (!['https:', 'http:'].includes(url.protocol) ||
         (url.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(url.hostname)) ||
         url.username || url.password || url.pathname !== '/' || url.search || url.hash ||
-        origin !== `${url.origin}/` && origin !== url.origin) {
+        origin !== `${url.origin}/` && origin !== url.origin &&
+        !(url.protocol === 'https:' && (origin === `${url.origin}:443` || origin === `${url.origin}:443/`))) {
       throw new Error('not an origin');
     }
     return url.origin;
