@@ -107,7 +107,11 @@ or a public environment variable. The Worker must enforce its own request-body
 and abuse controls. Do not enable a public route until these controls and
 negative HTTP tests (401, 413), TLS, and cleanup are verified.
 
-PyMuPDF is offered under AGPLv3 or a commercial license. Resolve the intended
-public/SaaS licensing model with the operator (comply with AGPL or buy a
-commercial license) before deployment; the repository's MIT license does not
-supersede PyMuPDF's license.
+This project's current source release is licensed under AGPL-3.0-only; see
+`../LICENSE` for the full text and copyright notice. PyMuPDF is a separate
+third-party dependency offered under AGPLv3 or a commercial license; its own
+copyright and license terms still apply. An AGPL-licensed repository alone does
+not satisfy the network-source-offer requirement: when operating a modified
+covered work as a public SaaS, provide users a prominent link to the complete
+corresponding source of the version actually running. Verify notices, bundled
+assets, and deployment-specific obligations before public operation.

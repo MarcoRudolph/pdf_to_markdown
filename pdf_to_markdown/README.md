@@ -1,70 +1,48 @@
-# Getting Started with Create React App
+# PDF to Markdown – Website
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+React-Landingpage (nur `/`) mit verlinktem Impressum (`/impressum`) und dienstspezifischer Datenschutzerklärung (`/datenschutz`). Die API wird ausschließlich über den gleichursprünglichen Node-Proxy `server.cjs` erreicht; der Browser kennt weder `API_TOKEN` noch die API-Adresse.
 
-## Available Scripts
+## Lokal starten
 
-In the project directory, you can run:
+Python 3.11 und Node.js werden benötigt. Im Repository:
 
-### `npm start`
+```bash
+cd API
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+export API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000
+```
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+In einem zweiten Terminal mit **demselben serverseitigen** `API_TOKEN`:
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+```bash
+cd pdf_to_markdown
+npm ci
+npm run build
+API_URL=http://127.0.0.1:8000 PORT=3001 npm run serve
+```
 
-### `npm test`
+Der Token muss in diesem zweiten Terminal ebenfalls als `API_TOKEN` exportiert werden (z. B. über einen lokalen Secret-Manager); der Platzhalter darf nicht im Repository oder in der Shell-History landen.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+`http://127.0.0.1:3001/` aus dem Browser aufrufen. Für die Entwicklung optional `npm start` auf Port 3000; CRA leitet `/v1/convert` an den Node-Proxy auf Port 3001 weiter. **Nie** den Token in `REACT_APP_*`, Frontend-Dateien, öffentlichen Environments oder URL-Parametern setzen. `API_URL` ist ausschließlich eine Server-Einstellung. Node verweigert den Start ohne Token. `HOST` ist standardmäßig `127.0.0.1` (kein öffentlicher Dienst).
 
-### `npm run build`
+## Tests
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+```bash
+cd pdf_to_markdown
+CI=true npm test -- --watch=false --runInBand
+npm run test:proxy
+npm run build
+cd ../API
+.venv/bin/python -m pytest -q
+# Bei laufender API und Website: testet echte generierte Text-PDF, Wiederholung,
+# ungültige PDF, übergroßen Request, PDF ohne Textebene und Rechtsrouten.
+.venv/bin/python tests/frontend_http.py
+```
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+Der Upload ist clientseitig auf 10 MiB und serverseitig auf 10 MiB/100 Seiten begrenzt. Der Proxy erlaubt maximal 10 MiB plus 64 KiB Multipart-Overhead und streamt den Request, ohne ihn als Datei zu speichern. Er spiegelt keine Fehlertexte der API zurück. Die Python-API schreibt eine private temporäre PDF und entfernt sie nach Konvertierung/Fehler. Uvicorn führt standardmäßig Access-Logs, sofern sie nicht ausdrücklich deaktiviert werden. Das HTML benutzt keine externen Skripte/Fonts und setzt keine Cookies.
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+## Vor öffentlichem Deployment
 
-### `npm run eject`
-
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+Nicht ungeprüft öffentlich freigeben: HTTPS/TLS und Reverse-Proxy-Bodylimit, Timeout/Rate- und Concurrency-Limits, Missbrauchsschutz, Hosting-/Log-Retention und Auftragsverarbeiter sowie Rechtsgrundlage prüfen. Der AGPL-Quellcode-Link muss zur **exakten laufenden Version** samt Proxy/API, Lizenz- und Drittanbieterhinweisen führen. Derzeit zeigt er auf das Projekt-Repository; eine versionsgenaue öffentliche Release/Commit-URL ist vor Publikation zu prüfen. Die Rechtstexte sind Entwürfe und müssen rechtlich geprüft werden. Donate ist absichtlich deaktiviert.
