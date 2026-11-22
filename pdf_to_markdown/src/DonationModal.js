@@ -42,6 +42,7 @@ export default function DonationModal({ onClose, locale, navigate = (url) => win
   const text = copy[locale === 'de' ? 'de' : 'en'];
   const dialog = useRef(null);
   const inFlight = useRef(false);
+  const pendingRequest = useRef(null);
   const mounted = useRef(true);
   const [available, setAvailable] = useState(true);
   const [selection, setSelection] = useState('10');
@@ -51,6 +52,21 @@ export default function DonationModal({ onClose, locale, navigate = (url) => win
   const validCustom = /^(?:[5-9]|[1-9][0-9]|[1-4][0-9]{2}|500)$/.test(custom);
   const amountCents = selection === 'custom' ? (validCustom ? Number(custom) * 100 : null) : Number(selection) * 100;
 
+  function cancelRequest() {
+    const request = pendingRequest.current;
+    if (!request) return;
+    pendingRequest.current = null;
+    clearTimeout(request.timer);
+    request.controller.abort();
+    request.reject(new Error('Checkout canceled'));
+    inFlight.current = false;
+  }
+
+  function close() {
+    cancelRequest();
+    onClose();
+  }
+
   useEffect(() => {
     mounted.current = true;
     const node = dialog.current;
@@ -59,7 +75,7 @@ export default function DonationModal({ onClose, locale, navigate = (url) => win
       return;
     }
     node.showModal();
-    return () => { mounted.current = false; if (node.open) node.close(); };
+    return () => { mounted.current = false; cancelRequest(); if (node.open) node.close(); };
   }, []);
 
   async function submit(event) {
@@ -68,29 +84,43 @@ export default function DonationModal({ onClose, locale, navigate = (url) => win
     inFlight.current = true;
     setLoading(true);
     setError(false);
+    const controller = new AbortController();
+    let rejectTimeout;
+    const timeout = new Promise((_, reject) => { rejectTimeout = reject; });
+    const request = { controller, reject: rejectTimeout, timer: setTimeout(() => {
+      controller.abort();
+      rejectTimeout(new Error('Checkout timed out'));
+    }, 10000) };
+    pendingRequest.current = request;
     try {
-      const response = await fetch('/api/donate', {
+      const response = await Promise.race([fetch('/api/donate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ amountCents, locale: locale === 'de' ? 'de' : 'en' }),
-      });
-      if (!response.ok) throw new Error('Checkout unavailable');
-      const { url } = await response.json();
-      if (!stripeCheckoutUrl(url)) throw new Error('Unsafe checkout URL');
-      if (mounted.current) navigate(url);
+        signal: controller.signal,
+      }).then(async (result) => {
+        if (!result.ok) throw new Error('Checkout unavailable');
+        return result.json();
+      }), timeout]);
+      if (!stripeCheckoutUrl(response.url)) throw new Error('Unsafe checkout URL');
+      if (mounted.current && pendingRequest.current === request) navigate(response.url);
     } catch (_) {
-      setError(true);
+      if (mounted.current && pendingRequest.current === request) setError(true);
     } finally {
-      inFlight.current = false;
-      setLoading(false);
+      clearTimeout(request.timer);
+      if (pendingRequest.current === request) {
+        pendingRequest.current = null;
+        inFlight.current = false;
+        if (mounted.current) setLoading(false);
+      }
     }
   }
 
-  if (!available) return <div role="alert" className="donation-unavailable">{text.unavailable} <button type="button" onClick={onClose}>{text.close}</button></div>;
+  if (!available) return <div role="alert" className="donation-unavailable">{text.unavailable} <button type="button" onClick={close}>{text.close}</button></div>;
 
   return (
     <dialog ref={dialog} className="donation-modal" aria-modal="true" aria-labelledby="donation-title"
-      onCancel={(event) => { event.preventDefault(); onClose(); }}>
-      <button type="button" className="donation-close" onClick={onClose} aria-label={text.close}>×</button>
+      onCancel={(event) => { event.preventDefault(); close(); }}>
+      <button type="button" className="donation-close" onClick={close} aria-label={text.close}>×</button>
       <h2 id="donation-title">{text.title}</h2>
       <p>{text.story}</p>
       <form onSubmit={submit} noValidate aria-label={text.title}>
@@ -99,7 +129,7 @@ export default function DonationModal({ onClose, locale, navigate = (url) => win
           <div className="donation-presets">
             {[5, 10, 20].map((amount) => (
               <button key={amount} type="button" aria-pressed={selection === String(amount)}
-                onClick={() => { setSelection(String(amount)); setError(false); }}>€{amount}</button>
+                onClick={() => { setSelection(String(amount)); setCustom(''); setError(false); }}>€{amount}</button>
             ))}
           </div>
           <label htmlFor="donation-custom">{text.custom}</label>
