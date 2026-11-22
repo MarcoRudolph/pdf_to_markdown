@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import DonationModal, { donationLocale } from './DonationModal';
 import './App.css';
 
 const LIMIT = 10 * 1024 * 1024;
@@ -19,16 +20,18 @@ function Legal({ privacy }) {
       <h2>Verantwortlicher</h2>
       <p>Marco Rudolph, No de Halloh 8a, 25591 Ottenbüttel. Kontakt: <a href="mailto:MarcoRudolph09@proton.me">MarcoRudolph09@proton.me</a>, Tel. 04893 9373110.</p>
       <h2>Verarbeitung beim Besuch</h2>
-      <p>Für die Auslieferung der Website und die Bearbeitung der Anfrage verarbeitet der Server technisch erforderliche Verbindungsdaten (insbesondere IP-Adresse, Zeitpunkt, aufgerufener Pfad, HTTP-Status und User-Agent). Der Node-Proxy dieser Anwendung schreibt keine eigenen Zugriffsprotokolle; Uvicorn führt standardmäßig Zugriffslogs mit Pfad, Status und Client-Adresse. Ob und wie lange Infrastruktur- oder Hosting-Logs gespeichert werden, hängt von der späteren Bereitstellung ab.</p>
+      <p>Für die Auslieferung der Website und die Bearbeitung der Anfrage verarbeitet der Server technisch erforderliche Verbindungsdaten (insbesondere IP-Adresse, Zeitpunkt, aufgerufener Pfad, HTTP-Status und User-Agent). Der lokale Node-Proxy dieser Anwendung schreibt keine eigenen Zugriffsprotokolle; Uvicorn führt standardmäßig Zugriffslogs mit Pfad, Status und Client-Adresse. Beim Betrieb über Cloudflare Pages Functions werden Zahlungsanfragen über Cloudflare verarbeitet; Hosting-Logs und Aufbewahrungsdauer sind anhand der tatsächlichen Bereitstellung zu prüfen.</p>
       <h2>PDF-Konvertierung</h2>
       <p>Beim Upload wird die PDF über unseren gleichursprünglichen Server-Proxy an die Konvertierungs-API übertragen. Die API prüft Dateiformat, Größe und Seitenzahl und extrahiert die vorhandene Textebene (keine OCR). Die PDF liegt während der Verarbeitung in einem privaten temporären Verzeichnis und wird nach Erfolg oder Fehler entfernt. Die Markdown-Antwort wird an den Browser zurückgegeben und dort bis zum Wechsel der Datei beziehungsweise Verlassen der Seite für den Download vorgehalten. Der Proxy speichert keine Kopie der PDF oder der Markdown-Antwort dauerhaft.</p>
       <p>Vermeiden Sie nach Möglichkeit vertrauliche Daten in hochgeladenen PDFs. Diese App verwendet selbst keine Konten, Analyse-Skripte oder Cookies; zusätzliche Komponenten der künftigen Hosting-Umgebung sind damit nicht beschrieben.</p>
+      <h2>Freiwillige Unterstützung und Zahlungsabwicklung</h2>
+      <p>Bei freiwilliger Unterstützung erstellt der Server über Stripe eine Zahlungsseite. Betrag und Sprache werden für die Zahlungsabwicklung an Stripe übertragen. Kartendaten geben Sie ausschließlich bei Stripe ein; sie gehen nicht durch unseren PDF-Proxy und werden nicht zusammen mit PDFs übertragen. Nach der Rückkehr fragen wir den Zahlungsstatus über den Server bei Stripe ab. <a href="https://stripe.com/de/privacy">Stripe-Datenschutzhinweise</a>.</p>
       <h2>Rechtsgrundlagen und Empfänger</h2>
-      <p>Die Verarbeitung erfolgt zur Bereitstellung des ausdrücklich angeforderten Konvertierungsdienstes und zur technischen Sicherheit. Die einschlägige Rechtsgrundlage (insbesondere Art. 6 Abs. 1 lit. b oder f DSGVO) und etwaige Auftragsverarbeiter/Übermittlungen sind vor Veröffentlichung anhand des tatsächlichen Betriebs rechtlich zu prüfen.</p>
+      <p>Die Verarbeitung dient dem angeforderten Konvertierungsdienst, der technischen Sicherheit und gegebenenfalls der Zahlungsabwicklung. Die einschlägigen Rechtsgrundlagen sowie Dienstleisterverträge und etwaige Übermittlungen sind vor Veröffentlichung anhand des tatsächlichen Betriebs rechtlich zu prüfen.</p>
       <h2>Ihre Rechte</h2>
       <p>Sie haben nach Maßgabe der DSGVO Rechte auf Auskunft, Berichtigung, Löschung, Einschränkung und Datenübertragbarkeit sowie gegebenenfalls Widerspruch. Kontaktieren Sie dafür den Verantwortlichen. Außerdem besteht ein Beschwerderecht bei einer Datenschutzaufsichtsbehörde.</p>
       <h2>Vor Veröffentlichung zu klären</h2>
-      <p>Hosting-Anbieter und Standorte, TLS-/Reverse-Proxy-Konfiguration, tatsächliche Access-/Error-Logs und deren Aufbewahrungsdauer, Schutz vor Missbrauch sowie die passende Rechtsgrundlage und Dienstleisterverträge. Es wird hier keine ungeprüfte Löschfrist für Logs behauptet.</p>
+      <p>Hosting-Anbieter und Standorte, TLS-/Reverse-Proxy-Konfiguration, tatsächliche Access-/Error-Logs und deren Aufbewahrungsdauer, Schutz vor Missbrauch, Stripe-Zahlungsabwicklung sowie die passende Rechtsgrundlage und Dienstleisterverträge. Es wird hier keine ungeprüfte Löschfrist für Logs behauptet.</p>
     </> : <>
       <h1>Impressum</h1>
       <h2>Angaben zum Betreiber</h2>
@@ -43,6 +46,48 @@ function Legal({ privacy }) {
 }
 
 function App() {
+  const donationsEnabled = process.env.REACT_APP_DONATIONS_ENABLED === '1';
+  const [donationOpen, setDonationOpen] = useState(false);
+  const donateRef = useRef(null);
+  const [donationReturn, setDonationReturn] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('donation') === 'cancel') return 'cancel';
+    if (params.get('donation') === 'success') return params.get('session_id') ? 'checking' : 'unavailable';
+    return null;
+  });
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('donation') !== 'success') return;
+    const sessionId = params.get('session_id');
+    if (!sessionId) return;
+    const controller = new AbortController();
+    async function verify() {
+      let result = 'unavailable';
+      try {
+        const response = await fetch(`/api/donate/status?session_id=${encodeURIComponent(sessionId)}`, { signal: controller.signal });
+        if (!response.ok) throw new Error('Status unavailable');
+        const body = await response.json();
+        if (['paid', 'processing', 'incomplete', 'expired'].includes(body.status)) result = body.status;
+      } catch (_) {
+        if (controller.signal.aborted) return;
+      }
+      if (!controller.signal.aborted) {
+        window.history.replaceState(null, '', '/');
+        setDonationReturn(result);
+      }
+    }
+    verify();
+    return () => controller.abort();
+  }, []);
+  const returnMessages = {
+    cancel: 'Zahlung abgebrochen. Es wurde keine Unterstützung bestätigt.',
+    checking: 'Zahlungsstatus wird geprüft …',
+    paid: 'Vielen Dank für Ihre Unterstützung! Ihre Zahlung wurde bestätigt.',
+    processing: 'Die Zahlung wartet noch auf Bestätigung. Bitte prüfen Sie den Status später bei Stripe.',
+    incomplete: 'Die Zahlung wurde nicht abgeschlossen.',
+    expired: 'Die Zahlungssitzung ist abgelaufen.',
+    unavailable: 'Der Zahlungsstatus ist derzeit nicht verfügbar oder nicht verifizierbar. Bitte prüfen Sie ihn bei Stripe.',
+  };
   const [file, setFile] = useState(null);
   const [stage, setStage] = useState('empty');
   const [progress, setProgress] = useState(null);
@@ -122,8 +167,10 @@ function App() {
   const waiting = stage === 'uploading' || stage === 'processing';
 
   return <div className="site">
-    <header className="site-header"><div className="header-inner"><a className="brand" href="/">PDF to Markdown</a><button className="donate" type="button" disabled aria-label="Donate – Demnächst verfügbar"><span>Donate</span><small>Demnächst verfügbar</small></button></div></header>
+    <header className="site-header"><div className="header-inner"><a className="brand" href="/">PDF to Markdown</a><button ref={donateRef} className="donate" type="button" disabled={!donationsEnabled} onClick={() => setDonationOpen(true)} aria-label={donationsEnabled ? 'Donate' : 'Donate – Demnächst verfügbar'}><span>Donate</span>{!donationsEnabled && <small>Demnächst verfügbar</small>}</button></div></header>
+    {donationOpen && donationsEnabled && <DonationModal locale={donationLocale(navigator.languages)} onClose={() => { setDonationOpen(false); donateRef.current?.focus(); }} />}
     {legal ? <Legal privacy={privacy} /> : <main className="landing content">
+      {donationReturn && <p role={donationReturn === 'unavailable' ? 'alert' : 'status'} className="service-note">{returnMessages[donationReturn]}</p>}
       <div className="eyebrow">EINFACH. LESBAR. OFFEN.</div>
       <h1>Ihre PDF. Klar in Markdown.</h1>
       <p className="intro">Wandeln Sie textbasierte PDFs in gut lesbares Markdown um. Ohne Konto und ohne OCR – die PDF benötigt eine vorhandene Textebene.</p>
