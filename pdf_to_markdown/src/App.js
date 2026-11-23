@@ -108,10 +108,12 @@ function App({ navigate = url => window.location.assign(url) }) {
         timer = setTimeout(cancel, 4000);
       });
       try {
-        return await Promise.race([
-          fetch('/v1/checkout-status?session_id=' + encodeURIComponent(refs[0]), { credentials: 'same-origin', signal: controller.signal }),
-          deadline,
-        ]);
+        const request = (async () => {
+          const response = await fetch('/v1/checkout-status?session_id=' + encodeURIComponent(refs[0]), { credentials: 'same-origin', signal: controller.signal });
+          if (!response.ok) throw new Error('Zahlungsstatus derzeit nicht verfügbar. Bitte später erneut prüfen oder Support kontaktieren.');
+          return response.json();
+        })();
+        return await Promise.race([request, deadline]);
       } finally {
         clearTimeout(timer);
         lifecycle.signal.removeEventListener('abort', cancel);
@@ -135,9 +137,7 @@ function App({ navigate = url => window.location.assign(url) }) {
       let ready = false;
       try {
         for (let attempt = 0; attempt < 4 && active; attempt++) {
-          const response = await fetchStatus();
-          if (!response.ok) throw new Error('Zahlungsstatus derzeit nicht verfügbar. Bitte später erneut prüfen oder Support kontaktieren.');
-          const result = await response.json();
+          const result = await fetchStatus();
           if (!active) return;
           if (result.status === 'ready' && typeof result.restore_code === 'string' && result.restore_code) {
             ready = true;

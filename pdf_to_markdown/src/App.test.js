@@ -149,6 +149,48 @@ test('unmount aborts an in-flight status fetch and clears its timeout', async ()
   timerSpy.mockRestore();
 });
 
+test('status body read timeout aborts, exposes retry, scrubs URL and ignores a late ready body', async () => {
+  jest.useFakeTimers();
+  window.history.replaceState({}, '', '/?session_id=cs_body_stalled&keep=1');
+  let statusSignal;
+  let finishBody;
+  const body = new Promise(resolve => { finishBody = resolve; });
+  global.fetch.mockImplementation((url, options) => url.startsWith('/v1/checkout-status')
+    ? (statusSignal = options.signal, Promise.resolve({ ok: true, json: () => body }))
+    : Promise.resolve(response(quota())));
+  render(<App />);
+  await act(async () => { await Promise.resolve(); });
+  expect(statusSignal).toBeDefined();
+  expect(screen.getByText(/Zahlung wird geprüft/i)).toBeInTheDocument();
+  await act(async () => { jest.advanceTimersByTime(5000); await Promise.resolve(); });
+  expect(statusSignal.aborted).toBe(true);
+  expect(screen.getByText(/Zahlungsstatus derzeit nicht verfügbar/i)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Zahlungsstatus erneut prüfen/i })).toBeInTheDocument();
+  expect(window.location.search).toBe('?keep=1');
+  await act(async () => { finishBody({ status: 'ready', restore_code: 'LATE-CODE' }); await Promise.resolve(); });
+  expect(screen.queryByText('LATE-CODE')).not.toBeInTheDocument();
+  expect(global.fetch.mock.calls.filter(([url]) => url.startsWith('/v1/checkout-status'))).toHaveLength(1);
+});
+
+test('unmount during status body read aborts and clears request deadline', async () => {
+  jest.useFakeTimers();
+  window.history.replaceState({}, '', '/?session_id=cs_body_unmount');
+  let statusSignal;
+  global.fetch.mockImplementation((url, options) => url.startsWith('/v1/checkout-status')
+    ? (statusSignal = options.signal, Promise.resolve({ ok: true, json: () => new Promise(() => {}) }))
+    : Promise.resolve(response(quota())));
+  const timerSpy = jest.spyOn(global, 'setTimeout');
+  const clearSpy = jest.spyOn(global, 'clearTimeout');
+  const view = render(<App />);
+  await act(async () => { await Promise.resolve(); });
+  expect(statusSignal).toBeDefined();
+  await act(async () => { view.unmount(); await Promise.resolve(); });
+  expect(statusSignal.aborted).toBe(true);
+  expect(clearSpy).toHaveBeenCalledWith(timerSpy.mock.results[0].value);
+  clearSpy.mockRestore();
+  timerSpy.mockRestore();
+});
+
 test('pending checkout never exposes restore code; bounded polling scrubs URL on exhaustion', async () => {
   window.history.replaceState({}, '', '/?session_id=cs_pending');
   global.fetch.mockImplementation(async url => response(url.startsWith('/v1/checkout-status') ? { status: 'pending' } : quota()));
