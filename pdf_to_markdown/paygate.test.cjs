@@ -59,30 +59,67 @@ test('malicious hash remains only in bound values and DB errors roll back', asyn
   assert.ok(f.calls.some(c => c.values?.includes(malicious)));
 });
 
-test('free reservation retains IP hash/day and refuses refund after midnight', async () => {
+test('free reservation and paid refund use saved DB day after Berlin midnight', async () => {
   const f = fakePool([{ rows: [] }, { rows: [{ day: '2026-11-22' }] }, { rows: [{ consumed: true }] }, { rows: [] },
-    { rows: [] }, { rows: [{ day: '2026-11-23' }] }, { rows: [] }]);
+    { rows: [{ refunded: 2 }] }, { rows: [{ refunded: 1 }] }]);
   const gate = createPaygate({ databaseUrl: 'unused', ipSecret, pool: f.pool });
   const reserved = await gate.reserveFree(subject, '192.0.2.14');
   assert.equal(reserved.day, '2026-11-22');
   assert.equal(reserved.units, 1);
   assert.match(reserved.ipHash, /^[0-9a-f]{64}$/);
-  await assert.rejects(gate.refundFreeDay(subject, reserved.ipHash, reserved.day), /day changed/);
-  assert.ok(!f.calls.some(c => c.text?.includes('paygate.refund_free')));
+  assert.equal(await gate.refundFreeDay(subject, reserved.ipHash, reserved.day), 2);
+  assert.equal(await gate.refundPaidDay('00000000-0000-4000-8000-000000000001', reserved.day), 1);
+  assert.equal(f.calls.length, 7); // no second day lookup or current-day refund
+  assert.equal(f.calls[5].text, 'select paygate.refund_pdf2md_free_day($1,$2,$3) as refunded');
+  assert.deepEqual(f.calls[5].values, [subject, reserved.ipHash, '2026-11-22']);
+  assert.equal(f.calls[6].text, 'select paygate.refund_pdf2md_paid_day($1,$2) as refunded');
+  assert.deepEqual(f.calls[6].values, ['00000000-0000-4000-8000-000000000001', '2026-11-22']);
 });
 
-test('write adapters call only granted functions with bound values and unsupported reads fail closed', async () => {
-  const f = fakePool([{ rows: [{ entitlement_id: 'ent-1' }] }, { rows: [{ reversed: true }] }, { rows: [{ redeemed: 2 }] }]);
+test('checkout and webhook adapters call only narrow wrappers with exact bound args', async () => {
+  const f = fakePool([{ rows: [{ fulfilled: true }] }, { rows: [{ entitlement_id: 'ent-1' }] },
+    { rows: [{ reversed: true }] }, { rows: [{ redeemed: 1 }] }, { rows: [{ recorded: null }] }]);
   const gate = createPaygate({ databaseUrl: 'unused', ipSecret, pool: f.pool });
-  assert.equal(await gate.fulfillGuarded({ sku: 'pass50', amountCents: 200, currency: 'eur', codeHash: code, ref: 'cs_1', email: 'buyer@example.org', subjectHash: subject }), 'ent-1');
+  assert.equal(await gate.checkoutFulfilled('cs_1', subject), true);
+  assert.equal(await gate.fulfillGuarded({ sku: 'pass50', amountCents: 200, currency: 'eur', codeHash: code, ref: 'cs_1', email: 'buyer@example.org', paymentIntentId: 'pi_1', subjectHash: subject, stripeCustomerId: 'cus_1' }), 'ent-1');
   assert.equal(await gate.recordReversal('pi_1', 'disputed'), true);
-  assert.equal(await gate.redeemEntitlement(code, subject), 2);
-  assert.match(f.calls[0].text, /paygate.fulfill_purchase/);
-  assert.deepEqual(f.calls[0].values.slice(0, 4), ['pdf2md', 'pass50', 'buyer@example.org', 'cs_1']);
-  assert.deepEqual(f.calls[1].values, ['pi_1', 'disputed']);
-  assert.deepEqual(f.calls[2].values, ['pdf2md', code, subject]);
-  await assert.rejects(gate.checkoutFulfilled('cs_1', subject), /unavailable/);
-  await assert.rejects(gate.recordAnomaly(code, 'unknown'), /unavailable/);
+  assert.equal(await gate.redeemEntitlement(code, subject), 1);
+  assert.equal(await gate.recordAnomaly('c'.repeat(64), 'price_mismatch'), undefined);
+  assert.deepEqual(f.calls.map(c => c.text), [
+    'select paygate.checkout_fulfilled($1,$2) as fulfilled',
+    'select paygate.pdf2md_fulfill_guarded($1,$2,$3,$4,$5,$6) as entitlement_id',
+    'select paygate.pdf2md_record_reversal($1,$2) as reversed',
+    'select paygate.redeem_pdf2md_entitlement($1,$2,$3) as redeemed',
+    'select paygate.pdf2md_record_anomaly($1,$2) as recorded',
+  ]);
+  assert.deepEqual(f.calls.map(c => c.values), [
+    ['cs_1', subject], ['buyer@example.org', 'cs_1', 'pi_1', code, subject, 'cus_1'],
+    ['pi_1', 'disputed'], [code, subject, 5], ['c'.repeat(64), 'price_mismatch'],
+  ]);
+});
+
+test('wrapper DB failures propagate; invalid reversal and anomaly codes do not write', async () => {
+  const f = fakePool([new Error('DB unavailable'), new Error('DB unavailable'), new Error('DB unavailable'), new Error('DB unavailable')]);
+  const gate = createPaygate({ databaseUrl: 'unused', ipSecret, pool: f.pool });
+  await assert.rejects(gate.refundFreeDay(subject, code, '2026-11-22'), /DB unavailable/);
+  await assert.rejects(gate.checkoutFulfilled('cs_1', subject), /DB unavailable/);
+  await assert.rejects(gate.fulfillGuarded({ sku: 'pass50', amountCents: 200, currency: 'eur', codeHash: code, ref: 'cs_1', email: 'buyer@example.org', paymentIntentId: 'pi_1', subjectHash: subject }), /DB unavailable/);
+  await assert.rejects(gate.recordAnomaly('c'.repeat(64), 'price_mismatch'), /DB unavailable/);
+  const before = f.calls.length;
+  await assert.rejects(gate.recordReversal('pi_1', 'paid'), /Invalid reversal status/);
+  await assert.rejects(gate.recordAnomaly('c'.repeat(64), 'raw event'), /Invalid anomaly reason/);
+  assert.equal(f.calls.length, before);
+});
+
+test('negative checkout, tombstoned fulfillment and wrapper DB failures stay visible', async () => {
+  const f = fakePool([{ rows: [{ fulfilled: false }] }, { rows: [{ entitlement_id: null }] },
+    new Error('refund failed'), new Error('reversal failed'), new Error('redeem failed')]);
+  const gate = createPaygate({ databaseUrl: 'unused', ipSecret, pool: f.pool });
+  assert.equal(await gate.checkoutFulfilled('cs_missing', subject), false);
+  assert.equal(await gate.fulfillGuarded({ sku: 'pass50', amountCents: 200, currency: 'eur', codeHash: code, ref: 'cs_1', email: 'buyer@example.org', paymentIntentId: 'pi_1', subjectHash: subject }), null);
+  await assert.rejects(gate.refundPaidDay('00000000-0000-4000-8000-000000000001', '2026-11-22'), /refund failed/);
+  await assert.rejects(gate.recordReversal('pi_1', 'refunded'), /reversal failed/);
+  await assert.rejects(gate.redeemEntitlement(code, subject), /redeem failed/);
 });
 
 test('startup refuses missing and unsafe server-only configuration', async () => {

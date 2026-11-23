@@ -20,12 +20,6 @@ function createPaygate({ databaseUrl, ipSecret, pool = new Pool({ connectionStri
       throw err;
     } finally { client.release(); }
   }
-  async function checkedRefund(day, work) {
-    return transaction(async (client, currentDay) => {
-      if (day !== currentDay) throw new Error('paygate refund day changed; refusing wrong-day refund');
-      return work(client);
-    });
-  }
   return {
     async verifyStartup() {
       const { rows } = await pool.query({ text: `select current_user as role, a.active as app_active, a.timezone,
@@ -56,33 +50,40 @@ function createPaygate({ databaseUrl, ipSecret, pool = new Pool({ connectionStri
         return rows[0]?.consumed ? { day, ...rows[0].consumed } : null;
       });
     },
-    refundFreeDay(subjectHash, hashedIp, day) {
-      return checkedRefund(day, client => client.query({ text: 'select paygate.refund_free($1,$2,$3)', values: [APP, subjectHash, hashedIp] }));
+    async refundFreeDay(subjectHash, hashedIp, day) {
+      const { rows } = await pool.query({ text: 'select paygate.refund_pdf2md_free_day($1,$2,$3) as refunded', values: [subjectHash, hashedIp, day] });
+      return rows[0].refunded;
     },
-    refundPaidDay(entitlementId, day) {
-      return checkedRefund(day, client => client.query({ text: 'select paygate.refund_paid($1)', values: [entitlementId] }));
+    async refundPaidDay(entitlementId, day) {
+      const { rows } = await pool.query({ text: 'select paygate.refund_pdf2md_paid_day($1,$2) as refunded', values: [entitlementId, day] });
+      return rows[0].refunded;
     },
-    // The current DB grant cannot read purchases or perform a guarded checkout lookup.
-    async checkoutFulfilled() { throw new Error('paygate checkout lookup unavailable without a granted SQL function'); },
+    async checkoutFulfilled(ref, subjectHash) {
+      const { rows } = await pool.query({ text: 'select paygate.checkout_fulfilled($1,$2) as fulfilled', values: [ref, subjectHash] });
+      return rows[0].fulfilled;
+    },
     async fulfillGuarded(args) {
-      if (args.sku !== 'pass50' || args.amountCents !== 200 || args.currency !== 'eur' || !args.codeHash || !args.ref || !args.email) {
+      if (args.sku !== 'pass50' || args.amountCents !== 200 || args.currency !== 'eur' || !args.codeHash || !args.ref || !args.email || !args.paymentIntentId || !args.subjectHash) {
         throw new Error('paygate fulfillment metadata mismatch');
       }
-      const values = [APP, args.sku, args.email, args.ref, args.paymentIntentId, args.amountCents, args.currency,
-        args.codeHash, args.subjectHash || null, args.stripeCustomerId || null, args.stripeSubscriptionId || null, args.expiresAt || null];
-      const { rows } = await pool.query({ text: `select paygate.fulfill_purchase(${values.map((_, i) => '$' + (i + 1)).join(',')}) as entitlement_id`, values });
-      return rows[0]?.entitlement_id;
+      const values = [args.email, args.ref, args.paymentIntentId, args.codeHash, args.subjectHash, args.stripeCustomerId || null];
+      const { rows } = await pool.query({ text: 'select paygate.pdf2md_fulfill_guarded($1,$2,$3,$4,$5,$6) as entitlement_id', values });
+      return rows[0].entitlement_id;
     },
     async recordReversal(paymentIntentId, status) {
       if (!['refunded', 'disputed'].includes(status)) throw new Error('Invalid reversal status');
-      const { rows } = await pool.query({ text: 'select paygate.refund_purchase($1,$2) as reversed', values: [paymentIntentId, status] });
-      return rows[0]?.reversed;
+      const { rows } = await pool.query({ text: 'select paygate.pdf2md_record_reversal($1,$2) as reversed', values: [paymentIntentId, status] });
+      return rows[0].reversed;
     },
     async redeemEntitlement(codeHash, subjectHash) {
-      const { rows } = await pool.query({ text: 'select paygate.redeem_code($1,$2,$3) as redeemed', values: [APP, codeHash, subjectHash] });
-      return rows[0]?.redeemed;
+      const { rows } = await pool.query({ text: 'select paygate.redeem_pdf2md_entitlement($1,$2,$3) as redeemed', values: [codeHash, subjectHash, 5] });
+      return rows[0].redeemed;
     },
-    async recordAnomaly() { throw new Error('paygate anomaly recording unavailable without a granted SQL function'); },
+    async recordAnomaly(eventHash, reason) {
+      if (!['price_mismatch', 'metadata_mismatch', 'missing_email', 'invalid_provider_shape'].includes(reason)) throw new Error('Invalid anomaly reason');
+      if (!/^[0-9a-f]{64}$/.test(eventHash)) throw new Error('Invalid anomaly event hash');
+      await pool.query({ text: 'select paygate.pdf2md_record_anomaly($1,$2) as recorded', values: [eventHash, reason] });
+    },
     close() { return pool.end(); },
   };
 }
