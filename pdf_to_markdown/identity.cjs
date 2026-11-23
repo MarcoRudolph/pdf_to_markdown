@@ -1,4 +1,4 @@
-const { createHmac, randomBytes, timingSafeEqual } = require('node:crypto');
+const { createHash, createHmac, randomBytes, timingSafeEqual } = require('node:crypto');
 const { isIP } = require('node:net');
 
 const COOKIE = 'pdf2md_id';
@@ -52,7 +52,7 @@ function identityFor(req, res, { cookieSecret, trustedProxyIp }) {
     res.setHeader('Set-Cookie', `${COOKIE}=${id}.${hmac(COOKIE + '|' + id).toString('hex')}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=31536000`);
   }
   res.setHeader('Cache-Control', 'no-store');
-  return { subjectHash: hmac('subject|' + id).toString('hex'), clientIp };
+  return { subjectHash: createHash('sha256').update(id, 'utf8').digest('hex'), clientIp };
 }
 
 module.exports = { identityFor };

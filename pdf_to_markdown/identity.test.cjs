@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const { createHash, createHmac } = require('node:crypto');
 const { identityFor } = require('./identity.cjs');
 const { createServer } = require('./server.cjs');
 
@@ -28,9 +29,16 @@ test('new random 128-bit IDs create distinct pseudonymous hashes and secure non-
   assert.notEqual(value, mintedCookie(b.headers));
   assert.match(a.result.subjectHash, /^[0-9a-f]{64}$/);
   assert.notEqual(a.result.subjectHash, b.result.subjectHash);
-  assert.ok(!a.result.subjectHash.includes(value.split('=')[1].split('.')[0]));
   assert.match(a.headers['set-cookie'], /; HttpOnly; Secure; SameSite=Lax; Path=\/; Max-Age=31536000$/);
   assert.equal(a.headers['cache-control'], 'no-store');
+});
+
+test('verified known cookie hashes exactly its unaltered ID with SHA-256', () => {
+  const id = 'AAAAAAAAAAAAAAAAAAAAAA'; // base64url of sixteen zero bytes
+  const signature = createHmac('sha256', cookieSecret).update('pdf2md_id|' + id).digest('hex');
+  const { result, headers } = identity(`pdf2md_id=${id}.${signature}`);
+  assert.equal(result.subjectHash, createHash('sha256').update(id, 'utf8').digest('hex'));
+  assert.equal(headers['set-cookie'], undefined); // signature verified, not rotated
 });
 
 test('valid signed ID preserves subject hash without replacing cookie', () => {
