@@ -130,7 +130,7 @@ test('HTTP invalid/oversized redeem 400, burst 429, Stripe outage 503 redacted',
 });
 
 function webhookFixture() {
-  const charge = { id:'ch_1', status:'succeeded', payment_intent:'pi_1', refunded:false, amount_refunded:0, disputed:false };
+  const charge = { id:'ch_1', status:'succeeded', payment_intent:'pi_1', amount:200, currency:'eur', refunded:false, amount_refunded:0, disputed:false };
   const pi = { id:'pi_1', status:'succeeded', amount:200, currency:'eur', metadata:{app:'pdf2md',sku:'pass50'}, latest_charge:charge };
   const session = { id:'cs_1', mode:'payment', status:'complete', payment_status:'paid', amount_total:200, currency:'eur', metadata:{app:'pdf2md',sku:'pass50',subject_hash:subject}, client_reference_id:subject, customer_details:{email:'buyer@example.invalid'}, payment_intent:pi, customer:'cus_1' };
   const items = {data:[{quantity:1,price:{id:'price_fixed'}}],has_more:false};
@@ -199,4 +199,55 @@ test('dispute event re-fetches charge and writes tombstone; duplicate checkout N
  f.setEvent({id:'evt_1',type:'checkout.session.async_payment_succeeded',data:{object:{id:'cs_1'}}});
  f.paygate.fulfillGuarded=async a=>{f.actions.push(['tombstoned',a]);return null;};
  assert.equal((await send()).status,200);assert.deepEqual(f.actions.map(x=>x[0]),['tombstoned']);
+});
+
+test('signed charge reversal never revokes a different-amount/currency charge, even at two euros refunded',async t=>{
+ const f=webhookFixture(),send=await webhookHarness(t,f);
+ f.setEvent({id:'evt_charge',type:'charge.refunded',data:{object:{id:'ch_1'}}});
+ for (const [amount,currency] of [[400,'eur'],[200,'usd'],[undefined,'eur']]) {
+   f.charge.amount=amount;f.charge.currency=currency;f.charge.amount_refunded=200;
+   assert.equal((await send()).status,503);
+   assert.equal(f.actions.some(a=>a[0]==='reverse'),false);
+ }
+ f.charge.amount=200;f.charge.currency='eur';
+ assert.equal((await send()).status,200);
+ assert.deepEqual(f.actions.at(-1),['reverse','pi_1','refunded']);
+});
+
+test('signed charge reversal retries when latest charge identity is unverified, without a tombstone',async t=>{
+ const f=webhookFixture(),send=await webhookHarness(t,f);
+ f.setEvent({id:'evt_charge',type:'charge.refunded',data:{object:{id:'ch_1'}}});
+ f.charge.amount_refunded=200;
+ for (const latest of [undefined,'ch_1',{id:'ch_other'}]) {
+   f.pi.latest_charge=latest;
+   assert.equal((await send()).status,503);
+   assert.equal(f.actions.some(a=>a[0]==='reverse'),false);
+ }
+ f.pi.latest_charge=f.charge;
+ assert.equal((await send()).status,200);
+ assert.deepEqual(f.actions.at(-1),['reverse','pi_1','refunded']);
+});
+
+test('checkout pre/post reversal checks retry on invalid charge amount or currency without acknowledging',async t=>{
+ const f=webhookFixture(),send=await webhookHarness(t,f);
+ // Expanded checkout charge is valid; separately fetched current charge is not.
+ f.pi.latest_charge={...f.charge};
+ f.charge.amount=400;f.charge.amount_refunded=200;
+ assert.equal((await send()).status,503);
+ assert.deepEqual(f.actions,[]);
+ f.charge.amount=200;f.charge.amount_refunded=0;
+ f.paygate.fulfillGuarded=async a=>{f.actions.push(['fulfill',a]);f.charge.currency='usd';return 'entitlement';};
+ assert.equal((await send()).status,503);
+ assert.deepEqual(f.actions.map(a=>a[0]),['fulfill']);
+});
+
+test('reversal requires a succeeded, verified PaymentIntent before revocation',async t=>{
+ const f=webhookFixture(),send=await webhookHarness(t,f);
+ f.setEvent({id:'evt_dispute',type:'charge.dispute.created',data:{object:{charge:'ch_1'}}});
+ f.charge.disputed=true;f.pi.status='requires_payment_method';
+ assert.equal((await send()).status,503);
+ assert.deepEqual(f.actions,[]);
+ f.pi.status='succeeded';
+ assert.equal((await send()).status,200);
+ assert.deepEqual(f.actions,[['reverse','pi_1','disputed']]);
 });

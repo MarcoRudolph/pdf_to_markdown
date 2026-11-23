@@ -6,15 +6,18 @@ function createPayments({ stripe, paygate, stripePriceId, publicBaseUrl, codeSec
   const restoreCode = ref => createHmac('sha256', codeSecret).update('pdf2md|' + ref, 'utf8').digest('base64url');
   const hex64 = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
   const scoped = pi => pi && typeof pi === 'object' && pi.metadata?.app === 'pdf2md' && pi.metadata?.sku === 'pass50';
+  const verifiedCharge = (pi, charge) => charge && charge.id && charge.payment_intent === pi.id &&
+    charge.status === 'succeeded' && pi.status === 'succeeded' && pi.amount === 200 && pi.currency === 'eur' &&
+    charge.amount === pi.amount && charge.currency === pi.currency;
   const reversal = charge => charge.disputed === true ? 'disputed' :
-    (charge.refunded === true || charge.amount_refunded === 200 ? 'refunded' : null);
+    (charge.refunded === true || charge.amount_refunded >= charge.amount ? 'refunded' : null);
   async function currentReversal(pi, charge) {
     const currentPi = await stripe.paymentIntents.retrieve(pi.id, { expand: ['latest_charge'] });
     if (!scoped(currentPi) || currentPi.id !== pi.id || typeof currentPi.latest_charge !== 'object' ||
         !currentPi.latest_charge || currentPi.latest_charge.id !== charge.id) throw new Error('Provider state unavailable');
     const currentCharge = await stripe.charges.retrieve(charge.id);
-    if (!currentCharge || currentCharge.id !== charge.id || currentCharge.payment_intent !== pi.id ||
-        currentCharge.status !== 'succeeded') throw new Error('Provider state unavailable');
+    if (!currentCharge || currentCharge.id !== charge.id || !verifiedCharge(currentPi, currentCharge))
+      throw new Error('Provider state unavailable');
     return reversal(currentCharge);
   }
   async function alert(event, reason) {
@@ -54,8 +57,8 @@ function createPayments({ stripe, paygate, stripePriceId, publicBaseUrl, codeSec
         const charge = pi?.latest_charge;
         if (session.mode !== 'payment' || session.status !== 'complete' || !scoped(pi) ||
             pi.status !== 'succeeded' || pi.amount !== 200 || pi.currency !== 'eur' ||
-            !pi.id || typeof charge !== 'object' || !charge || !charge.id || charge.status !== 'succeeded' ||
-            charge.payment_intent !== pi.id || (session.customer != null && typeof session.customer !== 'string')) {
+            !pi.id || typeof charge !== 'object' || !verifiedCharge(pi, charge) ||
+            (session.customer != null && typeof session.customer !== 'string')) {
           await alert(event, 'invalid_provider_shape'); return { status: 200 };
         }
         const before = await currentReversal(pi, charge);
@@ -77,10 +80,11 @@ function createPayments({ stripe, paygate, stripePriceId, publicBaseUrl, codeSec
         }
         const pi = await stripe.paymentIntents.retrieve(charge.payment_intent, { expand: ['latest_charge'] });
         if (!scoped(pi)) return { status: 200 };
-        if (pi.id !== charge.payment_intent || pi.amount !== 200 || pi.currency !== 'eur' ||
-            charge.status !== 'succeeded' || (pi.latest_charge && typeof pi.latest_charge === 'object' && pi.latest_charge.id !== id)) {
-          await alert(event, 'invalid_provider_shape'); return { status: 200 };
-        }
+        // Only the latest expanded charge can be linked to this scoped PI here.
+        // A historical charge needs independent verification; retry instead of tombstoning.
+        if (pi.id !== charge.payment_intent || typeof pi.latest_charge !== 'object' ||
+            !pi.latest_charge || pi.latest_charge.id !== id || !verifiedCharge(pi, charge))
+          throw new Error('Provider state unavailable');
         const state = reversal(charge);
         if (state) await paygate.recordReversal(pi.id, state);
         return { status: 200 };
