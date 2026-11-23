@@ -4,20 +4,132 @@ import App from './App';
 const pdf = (name = 'probe.pdf', size = 20, type = 'application/pdf') => new File([new Uint8Array(size)], name, { type });
 const choose = (file) => fireEvent.change(screen.getByLabelText('to File'), { target: { files: [file] } });
 
-beforeEach(() => { global.XMLHttpRequest = jest.fn(); });
+const quota = (free = 5, paid = []) => ({ free: { units_left: free, limits: { max_file_bytes: 1048576 } }, paid });
+const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+const xhrFixture = () => {
+  const requests = [];
+  global.XMLHttpRequest.mockImplementation(() => {
+    const xhr = { upload: {}, open: jest.fn(), send: jest.fn(), abort: jest.fn(), status: 402 };
+    requests.push(xhr);
+    return xhr;
+  });
+  return requests;
+};
+beforeEach(() => {
+  global.XMLHttpRequest = jest.fn();
+  global.fetch = jest.fn(async () => response(quota()));
+  window.history.replaceState({}, '', '/');
+});
+afterEach(() => { jest.useRealTimers(); });
 
-test('shows the landing page, legal links and a non-operational donation control', () => {
+test('shows server free balance and sum of active paid passes with distinct file limits and fixed offer', async () => {
+  global.fetch.mockResolvedValue(response(quota(2, [{ units_left: 17 }, { units_left: 31 }])));
   render(<App />);
+  expect(await screen.findByText(/2 PDFs frei/i)).toBeInTheDocument();
+  expect(screen.getByText(/48 PDFs mit Pass/i)).toBeInTheDocument();
+  expect(screen.getByText(/1 MiB frei.*10 MiB mit Pass/i)).toBeInTheDocument();
+  expect(screen.getByText(/2 € \/ 50 PDFs pro Tag \/ 30 Tage/i)).toBeInTheDocument();
+});
+
+test('402 offers checkout rather than generic retry and navigates only to server checkout URL', async () => {
+  const requests = xhrFixture();
+  global.fetch.mockImplementation(async url => url === '/v1/checkout' ? response({ url: 'https://checkout.stripe.com/c/pay' }) : response(quota(0)));
+  const navigate = jest.fn();
+  render(<App navigate={navigate} />);
+  choose(pdf());
+  fireEvent.click(screen.getByRole('button', { name: 'Upload' }));
+  act(() => requests[0].onload());
+  expect(await screen.findByText(/Pass benötigt/i)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Erneut versuchen' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getAllByRole('button', { name: /Pass kaufen/i })[1]);
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith('https://checkout.stripe.com/c/pay'));
+  expect(global.fetch).toHaveBeenCalledWith('/v1/checkout', expect.objectContaining({ method: 'POST', body: '{}' }));
+});
+
+test('pending checkout never exposes restore code; bounded polling scrubs URL on exhaustion', async () => {
+  window.history.replaceState({}, '', '/?session_id=cs_pending');
+  global.fetch.mockImplementation(async url => response(url.startsWith('/v1/checkout-status') ? { status: 'pending' } : quota()));
+  render(<App />);
+  expect(await screen.findByText(/Zahlung wird geprüft/i)).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByText(/noch nicht bestätigt/i)).toBeInTheDocument(), { timeout: 15000 });
+  expect(screen.queryByText(/Wiederherstellungscode:/i)).not.toBeInTheDocument();
+  expect(window.location.search).toBe('');
+  expect(global.fetch.mock.calls.filter(([url]) => url.startsWith('/v1/checkout-status')).length).toBeLessThanOrEqual(5);
+}, 20000);
+
+test('ready checkout reveals restore code only after verification and removes session URL', async () => {
+  window.history.replaceState({}, '', '/?session_id=cs_ready&keep=1');
+  global.fetch.mockImplementation(async url => response(url.startsWith('/v1/checkout-status') ? { status: 'ready', restore_code: 'CODE-SECRET' } : quota()));
+  render(<App />);
+  expect(await screen.findByText('CODE-SECRET')).toBeInTheDocument();
+  expect(screen.getAllByText(/sicher aufbewahren/i).length).toBeGreaterThan(0);
+  expect(window.location.search).toBe('?keep=1');
+});
+
+test('redeeming a code refreshes quota and does not claim success for invalid codes', async () => {
+  let free = 0;
+  global.fetch.mockImplementation(async url => {
+    if (url === '/v1/redeem') { free = 3; return response({ passes: 1 }); }
+    return response(quota(free, free ? [{ units_left: 50 }] : []));
+  });
+  render(<App />);
+  expect(await screen.findByText(/0 PDFs frei/i)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText(/Wiederherstellungscode eingeben/i), { target: { value: 'my-code' } });
+  fireEvent.click(screen.getByRole('button', { name: /Pass wiederherstellen/i }));
+  expect(await screen.findByText(/50 PDFs mit Pass/i)).toBeInTheDocument();
+  expect(global.fetch).toHaveBeenCalledWith('/v1/redeem', expect.objectContaining({ method: 'POST', body: JSON.stringify({ code: 'my-code' }) }));
+});
+
+test('quota 503 and checkout-status 503 are honest and do not reveal a code', async () => {
+  window.history.replaceState({}, '', '/?session_id=cs_unavailable');
+  global.fetch.mockResolvedValue(response({}, 503));
+  render(<App />);
+  expect(await screen.findByText(/Kontingent derzeit nicht verfügbar/i)).toBeInTheDocument();
+  expect(await screen.findByText(/Zahlungsstatus.*nicht verfügbar/i)).toBeInTheDocument();
+  expect(window.location.search).toBe('');
+});
+
+test('503 checkout status offers a manual retry without claiming payment', async () => {
+  window.history.replaceState({}, '', '/?session_id=cs_retry');
+  let available = false;
+  global.fetch.mockImplementation(async url => url.startsWith('/v1/checkout-status') ? (available ? response({ status: 'ready', restore_code: 'RETRY-CODE' }) : response({}, 503)) : response(quota()));
+  render(<App />);
+  expect(await screen.findByText(/Zahlungsstatus.*nicht verfügbar/i)).toBeInTheDocument();
+  expect(screen.queryByText('RETRY-CODE')).not.toBeInTheDocument();
+  available = true;
+  fireEvent.click(screen.getByRole('button', { name: /Zahlungsstatus erneut prüfen/i }));
+  expect(await screen.findByText('RETRY-CODE')).toBeInTheDocument();
+  expect(window.location.search).toBe('');
+});
+
+test('exactly 1 MiB and exactly 10 MiB are selectable; above 10 MiB rejected', async () => {
+  render(<App />);
+  await screen.findByText(/5 PDFs frei/i);
+  choose(pdf('free.pdf', 1048576));
+  expect(screen.getByRole('button', { name: 'Upload' })).toBeEnabled();
+  choose(pdf('paid.pdf', 10485760));
+  expect(screen.getByRole('button', { name: 'Upload' })).toBeEnabled();
+  choose(pdf('too-large.pdf', 10485761));
+  expect(screen.getByRole('alert')).toHaveTextContent(/10 MiB/);
+  expect(screen.getAllByText(/100 Seiten/i).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/keine OCR/i).length).toBeGreaterThan(0);
+});
+
+test('shows the landing page, legal links and a pass offer without a misleading donation control', async () => {
+  render(<App />);
+  await screen.findByText(/5 PDFs frei/i);
   expect(screen.getByRole('heading', { name: /ihre pdf.*markdown/i })).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /donate.*demnächst verfügbar/i })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: /donate/i })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Pass kaufen' })).toBeInTheDocument();
   expect(screen.getByRole('link', { name: 'Impressum' })).toHaveAttribute('href', '/impressum');
   expect(screen.getByRole('link', { name: 'Datenschutzerklärung' })).toHaveAttribute('href', '/datenschutz');
   expect(screen.getByRole('link', { name: /quellcode/i })).toHaveAttribute('href', 'https://github.com/MarcoRudolph/pdf_to_markdown');
   expect(screen.getByRole('button', { name: 'Upload' })).toBeDisabled();
 });
 
-test('rejects non PDF and oversized file before any network request', () => {
+test('rejects non PDF and oversized file before any network request', async () => {
   render(<App />);
+  await screen.findByText(/5 PDFs frei/i);
   choose(pdf('evil.txt', 10, 'text/plain'));
   expect(screen.getByRole('alert')).toHaveTextContent(/pdf/i);
   choose(pdf('large.pdf', 10485761));

@@ -10,9 +10,40 @@ a:hover { color: var(--qc-primary); }
 .site-header { min-height: var(--qc-header-height); border-bottom: 1px solid var(--qc-divider); background: var(--qc-header-surface); }
 .header-inner { max-width: 1240px; padding: 8px var(--qc-content-side-padding); margin: auto; min-height: var(--qc-header-height); display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .brand { color: var(--qc-ink); text-decoration: none; font-size: 16px; font-weight: 700; letter-spacing: -.02em; display: inline-flex; align-items: center; min-height: 44px; }
-.donate { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 148px; min-height: 44px; padding: 4px 12px; background: var(--qc-illustration-bg); border: 1px solid var(--qc-divider); border-radius: var(--qc-radius-button); color: var(--qc-selected-ink); line-height: 1.25; cursor: not-allowed; }
-.donate span { font-weight: 650; font-size: 14px; }
-.donate small { font-size: 11px; }
+.header-pass { color: var(--qc-selected-ink); background: var(--qc-illustration-bg); border-radius: var(--qc-radius-button); text-decoration: none; padding: 12px 16px; font-weight: 650; font-size: 14px; min-height: 44px; display: inline-flex; align-items: center; }
+.header-pass:hover { background: var(--qc-divider); }
+.quota-panel, .pass-panel, .payment-message, .restore-result { text-align: left; border: 1px solid var(--qc-divider); border-radius: var(--qc-radius-card); margin-bottom: 20px; }
+.quota-panel { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 24px; background: var(--qc-disabled-bg); }
+.quota-panel strong { font-size: 15px; }
+.quota-panel p { margin: 8px 0 0; color: var(--qc-muted); font-size: 14px; }
+.quota-panel span + span { margin-left: 16px; padding-left: 16px; border-left: 1px solid var(--qc-divider); }
+.quota-limits { white-space: nowrap; }
+.pass-panel { padding: 24px; background: linear-gradient(135deg, var(--qc-illustration-bg), var(--qc-surface) 76%); display: grid; grid-template-columns: 1fr auto; gap: 12px 24px; align-items: center; }
+.pass-kicker { color: var(--qc-primary); font-size: 11px; letter-spacing: .12em; font-weight: 700; }
+.pass-panel h2 { font-size: 24px; margin: 8px 0; }
+.pass-price { font-size: 18px; font-weight: 700; color: var(--qc-ink); }
+.pass-panel p { margin-bottom: 8px; line-height: 1.5; color: var(--qc-muted); }
+.pass-panel .primary { min-width: 150px; }
+.restore-form { grid-column: 1 / -1; border-top: 1px solid var(--qc-divider); padding-top: 20px; }
+.restore-form label { display: block; margin-bottom: 8px; font-weight: 600; font-size: 14px; }
+.restore-form div { display: flex; gap: 10px; }
+.restore-form input { flex: 1; min-width: 0; min-height: 44px; border: 1px solid var(--qc-input-border); border-radius: var(--qc-radius-input); padding: 8px 12px; }
+.restore-form button { border: 1px solid var(--qc-primary); border-radius: var(--qc-radius-button); background: var(--qc-surface); color: var(--qc-selected-ink); min-height: 44px; padding: 8px 16px; cursor: pointer; font-weight: 600; }
+.restore-form button:disabled { color: var(--qc-control-muted); border-color: var(--qc-divider); cursor: not-allowed; }
+.payment-message, .restore-result { padding: 16px 20px; background: var(--qc-illustration-bg); color: var(--qc-ink); line-height: 1.5; overflow-wrap: anywhere; }
+.payment-message button { display: block; min-height: 44px; margin-top: 10px; border: 1px solid var(--qc-primary); border-radius: var(--qc-radius-button); color: var(--qc-selected-ink); background: var(--qc-surface); padding: 8px 16px; cursor: pointer; font-weight: 600; }
+.restore-result { background: var(--qc-success-bg); }
+.restore-result code { display: inline-block; user-select: all; font-size: 15px; }
+.restore-result p { margin: 8px 0 0; }
+@media (max-width: 640px) {
+  .quota-panel { display: block; }
+  .quota-panel span { display: block; margin-top: 6px; }
+  .quota-panel span + span { margin-left: 0; padding-left: 0; border: 0; }
+  .quota-limits { white-space: normal; }
+  .pass-panel { grid-template-columns: 1fr; }
+  .restore-form div { flex-direction: column; }
+  .pass-panel .primary, .restore-form button { width: 100%; }
+}
 .content { width: min(100% - 2 * var(--qc-content-side-padding), var(--qc-content-max-width)); margin-inline: auto; }
 .landing { flex: 1; padding-block: clamp(48px, 7vh, 88px) 72px; text-align: center; }
 .eyebrow { color: var(--qc-primary); font-size: 11px; font-weight: 700; letter-spacing: .16em; margin-bottom: 16px; }
