@@ -12,12 +12,12 @@ const { parsePdf, LIMIT, UPLOAD_BODY_TIMEOUT_MS } = require('./upload.cjs');
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.ico': 'image/x-icon', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8' };
 
-function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId, stripeWebhookSecret, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false, testHandlers, testCraOrigin, uploadBodyTimeoutMs = UPLOAD_BODY_TIMEOUT_MS }) {
+function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId, stripeWebhookSecret, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false, testHandlers, testCraOrigin, uploadBodyTimeoutMs = UPLOAD_BODY_TIMEOUT_MS, donationsEnabled = false, stripeSecretKey, donationFetch }) {
   if (!token) throw new Error('API_TOKEN must be set on the server');
   try { http.validateHeaderValue('authorization', `Bearer ${token}`); }
   catch { throw new Error('Invalid API_TOKEN'); }
   if (!paygate && !testMode) throw new Error('paygate required outside explicit test mode');
-  if (!testMode && (testHandlers || testCraOrigin || uploadBodyTimeoutMs !== UPLOAD_BODY_TIMEOUT_MS)) throw new Error('Test-only route/origin/upload timeout override refused');
+  if (!testMode && (testHandlers || testCraOrigin || donationFetch || uploadBodyTimeoutMs !== UPLOAD_BODY_TIMEOUT_MS)) throw new Error('Test-only route/origin/upload timeout/fetch override refused');
   if (!Number.isSafeInteger(uploadBodyTimeoutMs) || uploadBodyTimeoutMs <= 0) throw new Error('Invalid upload body timeout');
   if (!publicBaseUrl || !cookieSecret || !isIP(trustedProxyIp)) throw new Error('PUBLIC_BASE_URL, PAYGATE_COOKIE_SECRET and TRUSTED_PROXY_IP required');
   const allowedOrigin = new URL(publicBaseUrl).origin;
@@ -30,7 +30,7 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId,
   // Single-process limiter; a shared store is mandatory before multiple workers.
   const paymentHits = new Map();
   function admitted(kind, identity) {
-    const now = Date.now(), max = kind === 'checkout' ? 10 : 20;
+    const now = Date.now(), max = ['checkout', 'donate'].includes(kind) ? 10 : 20;
     for (const key of [kind + ':subject:' + identity.subjectHash, kind + ':ip:' + identity.clientIp]) {
       const entry = paymentHits.get(key);
       if (entry && now - entry.start < 60000 && entry.count >= max) return false;
@@ -153,7 +153,57 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId,
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'");
     function reject(status, message) { if (!res.headersSent) { res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }); res.end(message); } }
-    const pathname = new URL(req.url, 'http://localhost').pathname;
+    const parsedUrl = new URL(req.url, 'http://localhost');
+    const pathname = parsedUrl.pathname;
+    if (pathname === '/api/donate' || pathname === '/api/donate/status') {
+      const checkout = pathname === '/api/donate';
+      const allowed = checkout ? 'POST' : 'GET';
+      res.setHeader('Cache-Control', 'no-store');
+      const reply = (status, data, extra = {}) => {
+        if (res.headersSent || res.destroyed) return;
+        res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...extra });
+        res.end(JSON.stringify(data));
+      };
+      if (req.method !== allowed) return reply(405, { error: 'Method not allowed' }, { Allow: allowed });
+      if (!donationsEnabled || !stripeSecretKey) return reply(503, { error: 'Donations unavailable' });
+      let origin = allowedOrigin;
+      if (checkout) {
+        const origins = req.headersDistinct?.origin;
+        let valid = false;
+        if (origins?.length === 1) {
+          try {
+            const candidate = new URL(origins[0]);
+            valid = origins[0] === candidate.origin && (candidate.origin === allowedOrigin || (testMode && candidate.origin === testCraOrigin));
+            if (valid) origin = candidate.origin;
+          } catch { /* invalid, null, or malformed Origin */ }
+        }
+        if (!valid) return reply(403, { error: 'Forbidden' });
+      }
+      let identity;
+      try { identity = identityFor(req, res, { cookieSecret, trustedProxyIp }); }
+      catch { return reply(503, { error: 'Client IP unavailable' }); }
+      if (!admitted(checkout ? 'donate' : 'donate-status', identity)) return reply(429, { error: 'Too many requests' }, { 'Retry-After': '60' });
+      (async () => {
+        const { createDonationCheckout, getDonationStatus, DonationError } = await import('./donation.mjs');
+        const fetchImpl = donationFetch || fetch;
+        try {
+          if (checkout) {
+            let data;
+            try { data = await jsonBody(req); } catch { throw new DonationError(400, 'Invalid donation request'); }
+            if (Object.keys(data).some(key => !['amountCents', 'locale'].includes(key))) throw new DonationError(400, 'Invalid donation request');
+            reply(201, await createDonationCheckout({ ...data, origin, stripeKey: stripeSecretKey, fetchImpl }));
+          } else {
+            const refs = parsedUrl.searchParams.getAll('session_id');
+            if (refs.length !== 1 || [...parsedUrl.searchParams.keys()].some(key => key !== 'session_id')) throw new DonationError(400, 'Invalid donation request');
+            reply(200, await getDonationStatus({ sessionId: refs[0], stripeKey: stripeSecretKey, fetchImpl }));
+          }
+        } catch (error) {
+          const status = error instanceof DonationError && [400, 502, 503].includes(error.status) ? error.status : 502;
+          reply(status, { error: { 400: 'Invalid donation request', 503: 'Donations unavailable', 502: 'Payment provider unavailable' }[status] });
+        }
+      })().catch(() => reply(502, { error: 'Payment provider unavailable' }));
+      return;
+    }
     if (pathname === '/v1/stripe/webhook') {
       if (req.method !== 'POST') return reject(405, 'Method not allowed');
       const signatures = req.headersDistinct?.['stripe-signature'];
@@ -214,7 +264,7 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId,
         (async () => {
           let result;
           if (pathname === '/v1/checkout-status') {
-            const url = new URL(req.url, 'http://localhost');
+            const url = parsedUrl;
             const refs = url.searchParams.getAll('session_id');
             if (refs.length !== 1 || !/^cs_[A-Za-z0-9_]{1,120}$/.test(refs[0]) || [...url.searchParams.keys()].some(key => key !== 'session_id')) throw Object.assign(new Error('Invalid request'), { status: 400 });
             result = await payments.status(refs[0], identity.subjectHash);
@@ -321,7 +371,8 @@ async function createConfiguredServer(env, { paygateFactory = createPaygate, str
     const stripe = stripeFactory(env.STRIPE_SECRET_KEY);
     return createServer({ token: env.API_TOKEN, apiUrl: env.API_URL || 'http://127.0.0.1:8000', buildDir: path.join(__dirname, 'build'),
       paygate, stripe, stripePriceId: env.STRIPE_PRICE_ID, publicBaseUrl: env.PUBLIC_BASE_URL, ipSecret: env.PAYGATE_IP_SECRET,
-      codeSecret: env.PAYGATE_CODE_SECRET, stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET, cookieSecret: env.PAYGATE_COOKIE_SECRET, trustedProxyIp: env.TRUSTED_PROXY_IP });
+      codeSecret: env.PAYGATE_CODE_SECRET, stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET, cookieSecret: env.PAYGATE_COOKIE_SECRET, trustedProxyIp: env.TRUSTED_PROXY_IP,
+      donationsEnabled: env.DONATIONS_ENABLED === '1', stripeSecretKey: env.STRIPE_SECRET_KEY });
   } catch (error) {
     await paygate.close();
     throw error;

@@ -330,3 +330,89 @@ test('redacts API errors and retries with the same file', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Erneut versuchen' }));
   expect(requests).toHaveLength(2);
 });
+
+describe('voluntary donation', () => {
+  const donationCalls = () => global.fetch.mock.calls.filter(([url]) => String(url).startsWith('/api/donate'));
+  const passStatusCalls = () => global.fetch.mock.calls.filter(([url]) => String(url).startsWith('/v1/checkout-status'));
+  afterEach(() => { delete process.env.REACT_APP_DONATIONS_ENABLED; });
+
+  test('enabled Donate opens a native dialog and closing restores trigger focus', async () => {
+    process.env.REACT_APP_DONATIONS_ENABLED = '1';
+    render(<App />);
+    const donate = screen.getByRole('button', { name: 'Donate' });
+    fireEvent.click(donate);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /schließen|close/i }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(donate).toHaveFocus();
+    expect(donationCalls()).toHaveLength(0);
+    expect(screen.getByRole('link', { name: 'PDF-Pass ansehen' })).toBeInTheDocument();
+    await screen.findByText(/5 PDFs frei/i);
+  });
+
+  test('outside the German region the enabled modal uses English', async () => {
+    process.env.REACT_APP_DONATIONS_ENABLED = '1';
+    const languages = jest.spyOn(navigator, 'languages', 'get').mockReturnValue(['de-US', 'de-DE']);
+    try {
+      render(<App />);
+      fireEvent.click(screen.getByRole('button', { name: 'Donate' }));
+      expect(screen.getByRole('dialog', { name: 'Support' })).toBeInTheDocument();
+      await screen.findByText(/5 PDFs frei/i);
+    } finally { languages.mockRestore(); }
+  });
+
+  test('canceled checkout is neutral, scrubbed, and does not request any payment status', async () => {
+    window.history.replaceState(null, '', '/?donation=cancel');
+    render(<App />);
+    expect(screen.getByText(/abgebrochen/i)).toBeInTheDocument();
+    expect(screen.queryByText(/vielen dank/i)).not.toBeInTheDocument();
+    await screen.findByText(/5 PDFs frei/i);
+    expect(donationCalls()).toHaveLength(0);
+    expect(passStatusCalls()).toHaveLength(0);
+    expect(window.location.search).toBe('');
+  });
+
+  test('success return missing a session ID never thanks or fetches status', async () => {
+    window.history.replaceState(null, '', '/?donation=success');
+    render(<App />);
+    expect(screen.getByRole('alert')).toHaveTextContent(/nicht verifizier|nicht verfügbar/i);
+    await screen.findByText(/5 PDFs frei/i);
+    expect(donationCalls()).toHaveLength(0);
+    expect(screen.queryByText(/vielen dank für ihre unterstützung/i)).not.toBeInTheDocument();
+  });
+
+  test.each([
+    ['processing', /bestätigung/i],
+    ['incomplete', /nicht abgeschlossen/i],
+    ['expired', /abgelaufen/i],
+    ['paid', /vielen dank für ihre unterstützung/i],
+  ])('verified %s donation shows only its message, removes the session ID and never runs the pass status flow', async (status, message) => {
+    window.history.replaceState(null, '', '/?donation=success&session_id=cs_test_dummy');
+    global.fetch.mockImplementation(async url => String(url).startsWith('/api/donate/status') ? response({ status }) : response(quota()));
+    render(<App />);
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(global.fetch).toHaveBeenCalledWith('/api/donate/status?session_id=cs_test_dummy', expect.objectContaining({ signal: expect.any(Object) }));
+    expect(passStatusCalls()).toHaveLength(0);
+    expect(screen.queryByText(/Zahlung wird geprüft/i)).not.toBeInTheDocument();
+    expect(window.location.pathname + window.location.search).toBe('/');
+    if (status !== 'paid') expect(screen.queryByText(/vielen dank/i)).not.toBeInTheDocument();
+  });
+
+  test('status network error shows unavailable, hides identifier and never thanks', async () => {
+    window.history.replaceState(null, '', '/?donation=success&session_id=cs_test_dummy');
+    global.fetch.mockImplementation(async url => { if (String(url).startsWith('/api/donate')) throw new Error('sensitive provider response'); return response(quota()); });
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/nicht verfügbar/i));
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/sensitive|vielen dank/i);
+    expect(window.location.pathname + window.location.search).toBe('/');
+  });
+
+  test('privacy page describes donations via Stripe and links its privacy notice', () => {
+    window.history.replaceState(null, '', '/datenschutz');
+    render(<App />);
+    expect(screen.getByRole('main')).toHaveTextContent(/kartendaten.*nicht.*pdf.proxy/i);
+    expect(screen.getByRole('main')).toHaveTextContent(/Unterstützung schaltet kein Kontingent frei/i);
+    expect(screen.getByRole('link', { name: /stripe.*datenschutz/i })).toHaveAttribute('href', expect.stringMatching(/^https:\/\/stripe\.com\//));
+    expect(document.querySelector('script[src*="stripe"]')).toBeNull();
+  });
+});

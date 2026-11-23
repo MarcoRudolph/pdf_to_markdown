@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import DonationModal, { donationLocale } from './DonationModal';
 import './App.css';
 
 const LIMIT = 10 * 1024 * 1024;
@@ -29,6 +30,8 @@ function Legal({ privacy }) {
       <h2>Kontingent, Zahlung und Wiederherstellung</h2>
       <p>Die App speichert in der Paygate-Datenbank pseudonyme Kontingent- und Nutzungsdaten sowie bei Käufen die von Stripe übermittelte E-Mail-Adresse, Stripe-Kauf-/Zahlungsreferenzen, Pass-Laufzeit, Nutzungswerte und einen Hash des kaufbezogenen Wiederherstellungscodes. Der Code ist bei bestätigter Zahlung mit derselben Zahlungsreferenz und dem ursprünglichen Cookie im Browser erneut abrufbar; bewahren Sie ihn trotzdem selbst sicher auf. Eine Checkout-Rückleitung allein bestätigt keine Zahlung. Bei Wiederherstellung wird der eingegebene Code serverseitig gehasht und der Pass mit dem aktuellen Cookie verknüpft. Stripe verarbeitet für den Checkout E-Mail-Adresse und Zahlungsdaten nach seinen eigenen Bedingungen; diese App speichert keine vollständigen Kartendaten. Der Checkout übermittelt eine pseudonyme Referenz an Stripe.</p>
       <p>Der Cookie hat eine maximale Lebensdauer von einem Jahr; ein Pass gilt 30 Tage ab Kauf. Diese Fristen sind <strong>keine</strong> automatische Löschfrist für Datenbankeinträge. Für Kauf-/Abrechnungsdaten, Code-Hashes, Nutzungswerte, technische Logs und Backups sind tatsächliche Aufbewahrungs- und Löschfristen noch festzulegen und rechtlich zu prüfen. Der Proxy schreibt keine eigenen Access-Logs, aber Uvicorn protokolliert standardmäßig Client-IP, Pfad und Status; vorgeschaltete Hosting-/TLS-Komponenten können weitere Logs führen. Die Status-URL wird nach Prüfung aus der Browseradresszeile entfernt; zuvor sichtbare Referenzen können in Browserhistorie oder Infrastruktur-Logs angefallen sein.</p>
+      <h2>Freiwillige Unterstützung</h2>
+      <p>Bei freiwilliger Unterstützung erstellt der Server über Stripe eine Zahlungsseite. Betrag und Sprache werden für die Zahlungsabwicklung an Stripe übertragen. Kartendaten geben Sie ausschließlich bei Stripe ein; sie gehen nicht durch unseren PDF-Proxy und werden nicht zusammen mit PDFs übertragen. Eine Unterstützung schaltet kein Kontingent frei. Nach der Rückkehr fragen wir den Zahlungsstatus über den Server bei Stripe ab. <a href="https://stripe.com/de/privacy">Stripe-Datenschutzhinweise</a>.</p>
       <h2>Rechtsgrundlagen und Empfänger</h2>
       <p>Die Verarbeitung erfolgt zur Bereitstellung des Konvertierungsdienstes, zur Verwaltung bezahlter Pässe und zur technischen Sicherheit. Empfänger sind der Zahlungsdienstleister Stripe (Checkout, Zahlungsabwicklung), der Betreiber der Paygate-PostgreSQL-Datenbank und die Hosting-/TLS-/Reverse-Proxy-Anbieter; konkrete Anbieter, Standorte, Drittlandübermittlungen und Verträge sind vor Betrieb einzutragen. Die einschlägigen Rechtsgrundlagen (z. B. Art. 6 Abs. 1 lit. b, c oder f DSGVO) einschließlich Cookie-Einordnung sind von einer Rechtsberatung für den tatsächlichen Betrieb zu prüfen; dieser Entwurf behauptet keine abschließende rechtliche Bewertung.</p>
       <h2>Ihre Rechte</h2>
@@ -49,6 +52,47 @@ function Legal({ privacy }) {
 }
 
 function App({ navigate = url => window.location.assign(url) }) {
+  const donationsEnabled = process.env.REACT_APP_DONATIONS_ENABLED === '1';
+  const [donationOpen, setDonationOpen] = useState(false);
+  const donateRef = useRef(null);
+  const [donationReturn, setDonationReturn] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('donation') === 'cancel') return 'cancel';
+    if (params.get('donation') === 'success') return params.get('session_id') ? 'checking' : 'unavailable';
+    return null;
+  });
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (!['success', 'cancel'].includes(params.get('donation'))) return;
+    const scrub = () => window.history.replaceState(window.history.state, '', window.location.pathname);
+    const sessionId = params.get('session_id');
+    if (params.get('donation') !== 'success' || !sessionId) { scrub(); return; }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    let unmounted = false;
+    async function verify() {
+      let result = 'unavailable';
+      try {
+        const response = await fetch(`/api/donate/status?session_id=${encodeURIComponent(sessionId)}`, { credentials: 'same-origin', signal: controller.signal });
+        if (!response.ok) throw new Error('Status unavailable');
+        const body = await response.json();
+        if (['paid', 'processing', 'incomplete', 'expired'].includes(body.status)) result = body.status;
+      } catch (_) { /* neutral unavailable message */ }
+      clearTimeout(timer);
+      if (!unmounted) { scrub(); setDonationReturn(result); }
+    }
+    verify();
+    return () => { unmounted = true; clearTimeout(timer); controller.abort(); };
+  }, []);
+  const returnMessages = {
+    cancel: 'Zahlung abgebrochen. Es wurde keine Unterstützung bestätigt.',
+    checking: 'Zahlungsstatus wird geprüft …',
+    paid: 'Vielen Dank für Ihre Unterstützung! Ihre Zahlung wurde bestätigt.',
+    processing: 'Die Zahlung wartet noch auf Bestätigung. Bitte prüfen Sie den Status später bei Stripe.',
+    incomplete: 'Die Zahlung wurde nicht abgeschlossen.',
+    expired: 'Die Zahlungssitzung ist abgelaufen.',
+    unavailable: 'Der Zahlungsstatus ist derzeit nicht verfügbar oder nicht verifizierbar. Bitte prüfen Sie ihn bei Stripe.',
+  };
   const [file, setFile] = useState(null);
   const [stage, setStage] = useState('empty');
   const [progress, setProgress] = useState(null);
@@ -85,7 +129,7 @@ function App({ navigate = url => window.location.assign(url) }) {
     refreshQuota();
     const location = new URL(window.location.href);
     const refs = location.searchParams.getAll('session_id');
-    if (!refs.length) return () => { active = false; };
+    if (!refs.length || location.searchParams.has('donation')) return () => { active = false; };
     const scrub = () => {
       location.searchParams.delete('session_id');
       window.history.replaceState(window.history.state, '', location.pathname + location.search + location.hash);
@@ -266,8 +310,10 @@ function App({ navigate = url => window.location.assign(url) }) {
   const waiting = stage === 'uploading' || stage === 'processing';
 
   return <div className="site">
-    <header className="site-header"><div className="header-inner"><a className="brand" href="/">PDF to Markdown</a><a className="header-pass" href="/#pass">PDF-Pass ansehen</a></div></header>
+    <header className="site-header"><div className="header-inner"><a className="brand" href="/">PDF to Markdown</a><div className="header-actions"><a className="header-pass" href="/#pass">PDF-Pass ansehen</a>{donationsEnabled && <button ref={donateRef} className="donate" type="button" onClick={() => setDonationOpen(true)}>Donate</button>}</div></div></header>
+    {donationOpen && donationsEnabled && <DonationModal locale={donationLocale(navigator.languages)} onClose={() => { setDonationOpen(false); donateRef.current?.focus(); }} />}
     {legal ? <Legal privacy={privacy} /> : <main className="landing content">
+      {donationReturn && <p role={donationReturn === 'unavailable' ? 'alert' : 'status'} className="service-note">{returnMessages[donationReturn]}</p>}
       <div className="eyebrow">EINFACH. LESBAR. OFFEN.</div>
       <h1>Ihre PDF. Klar in Markdown.</h1>
       <p className="intro">Wandeln Sie textbasierte PDFs in gut lesbares Markdown um. Ohne Konto und ohne OCR – die PDF benötigt eine vorhandene Textebene.</p>

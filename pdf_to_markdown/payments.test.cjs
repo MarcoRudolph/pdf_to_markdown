@@ -251,3 +251,10 @@ test('reversal requires a succeeded, verified PaymentIntent before revocation',a
  assert.equal((await send()).status,200);
  assert.deepEqual(f.actions,[['reverse','pi_1','disputed']]);
 });
+test('voluntary donation sessions are ignored by the pass webhook without alert or fulfilment',async t=>{
+ const f=webhookFixture(),send=await webhookHarness(t,f);
+ f.session.metadata={donation_context:'pdf_to_markdown'};f.session.amount_total=500;f.items.data[0].price.id='price_adhoc';
+ assert.equal((await send()).status,200);assert.equal(f.actions.length,0);
+ f.session.metadata={donation_context:'pdf_to_markdown',app:'pdf2md',sku:'pass50'};
+ assert.equal((await send()).status,200);assert.equal(f.actions.at(-1)[0],'alert');
+});

@@ -37,6 +37,19 @@ Quellcode und Details: [`pdf_to_markdown/README.md`](pdf_to_markdown/README.md)
 für Website und lokalen Start, [`API/README.md`](API/README.md) für API und
 Betriebsgrenzen.
 
+## Freiwillige Unterstützung (noch nicht live freigegeben)
+
+Donate läuft ausschließlich über den Node-Paygate-Server (`/api/donate`,
+`/api/donate/status`), nicht über Cloudflare Pages Functions. Es ist doppelt
+deaktiviert, bis beides gesetzt ist: `REACT_APP_DONATIONS_ENABLED=1` im
+Frontend-Build (kein Secret) und `DONATIONS_ENABLED=1` am Server. Der Checkout
+nutzt `STRIPE_SECRET_KEY` und als Rücksprung-Origin `PUBLIC_BASE_URL`; der
+Origin-Header muss exakt passen, Anfragen sind pro Client rate-limitiert. Eine
+Spende schaltet kein Kontingent frei; der Pass-Webhook ignoriert
+Spenden-Sessions (`metadata.donation_context`). Vor live: Rechtstexte freigeben,
+Stripe Radar prüfen, Testmodus-Smoke-Test in Staging. Keine Live-Zahlung ohne
+gesonderte Zustimmung.
+
 ## Lizenz
 
 Copyright (C) 2026 Marco Rudolph. Der Quellcode dieser aktuellen Version steht,

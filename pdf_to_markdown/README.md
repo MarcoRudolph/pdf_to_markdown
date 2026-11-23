@@ -50,6 +50,18 @@ cd ../API
 
 Der Upload ist clientseitig auf 10 MiB begrenzt; serverseitig sind kostenlos höchstens 1 MiB, mit aktivem Pass höchstens 10 MiB und in der Python-API maximal 100 Seiten zulässig. Kein OCR. Der Proxy erlaubt maximal 10 MiB plus 64 KiB Multipart-Overhead, streamt den Request ohne Dateispeicherung und spiegelt API-Fehlertexte nicht zurück. Die Python-API schreibt eine private temporäre PDF und entfernt sie nach Konvertierung/Fehler. Uvicorn führt standardmäßig Access-Logs. Der Proxy setzt einen signierten, HttpOnly/Secure/SameSite=Lax-Kontingent-Cookie; Details und offene Retention-Fragen stehen im Datenschutz-Entwurf.
 
+## Donate (lokaler Test)
+
+Standardmäßig aus. Für einen lokalen Testmodus `REACT_APP_DONATIONS_ENABLED=1`
+beim Build/`npm start` und `DONATIONS_ENABLED=1` für `npm run serve` setzen;
+`STRIPE_SECRET_KEY` muss ein **Testschlüssel** sein und gehört nie in
+`REACT_APP_*`, Git oder Shell-History. Der Checkout akzeptiert nur den exakten
+Origin aus `PUBLIC_BASE_URL` und leitet dorthin zurück
+(`/?donation=success&session_id=…` bzw. `/?donation=cancel`). Der Status wird
+serverseitig bei Stripe geprüft; nur `paid` zeigt einen Dank, die Session-ID
+wird danach aus der URL entfernt. Spenden-Rückleitungen lösen nie die
+Pass-Statusprüfung aus.
+
 ## Vor öffentlichem Deployment
 
 **Nicht als statische Cloudflare-Pages-Seite mit zahlungspflichtigen Aussagen veröffentlichen.** Der tatsächlich ausgelieferte Build muss zusammen mit dem Node-Proxy, der Python-API und der migrierten Paygate-Datenbank laufen. Test-/Live-Checkout und Webhook getrennt prüfen; Zahlungen, Erstattungen, Chargebacks, fehlgeschlagene Webhooks sowie unklare Upstream-Konvertierungen gegen Kontingent-Reservierungen abstimmen. Bei Fehlern paid Checkout sperren/Deployment zurückrollen, ohne vorhandene Kauf-/Nutzungsdaten zu löschen; Reconciliation dokumentieren und vor Wiederfreigabe nachholen. DB-/Secret-Rotation, Backups und Wiederherstellung separat planen. HTTPS/TLS, Body-Limit, Timeout/Rate/Concurrency, Missbrauchsschutz und Logs prüfen. Vor Veröffentlichung Aufbewahrungsfristen, Auftragsverarbeiter und Rechtsgrundlagen verbindlich festlegen und Datenschutz/Impressum rechtlich prüfen. Der AGPL-Quellcode-Link muss auf eine **exakte öffentlich erreichbare Release- oder Commit-Version** samt Proxy/API, Lizenz- und Drittanbieterhinweisen verweisen; der derzeitige Repository-Link ist nicht versionsgenau. Kein Produktions- oder Stripe-Live-Deployment durch diese Aufgabe.

@@ -435,3 +435,121 @@ test('configured startup rejects invalid API_TOKEN before constructing a paygate
 test('server refuses missing secret at startup', () => {
   assert.throws(() => createServer({ token: '', apiUrl: 'http://127.0.0.1:8000', buildDir: __dirname }), /API_TOKEN/);
 });
+
+const donationSession = { id: 'cs_test_123abc', mode: 'payment', currency: 'eur', amount_total: 500, metadata: { donation_context: 'pdf_to_markdown' }, status: 'complete', payment_status: 'paid' };
+async function withDonationServer(t, stripeFetch, { enabled = true, stripeSecretKey = 'sk_test_123abc' } = {}) {
+  const server = createServer({ token: 'private-only', apiUrl: 'http://127.0.0.1:8000', buildDir: __dirname,
+    testMode: true, paygate: fakePaygate(), publicBaseUrl: 'https://pdf.example.test', testCraOrigin: 'http://localhost:3000',
+    cookieSecret: 'test-cookie-secret-which-is-never-live', trustedProxyIp: '192.0.2.8',
+    donationsEnabled: enabled, stripeSecretKey, donationFetch: stripeFetch });
+  const port = await listen(server);
+  t.after(() => close(server));
+  return `http://127.0.0.1:${port}`;
+}
+async function donationRequest(base, route, method, origin, body, contentType = 'application/json') {
+  const headers = {};
+  if (origin !== null) headers.Origin = origin;
+  if (body !== undefined) headers['Content-Type'] = contentType;
+  const response = await fetch(`${base}${route}`, { method, headers, ...(body === undefined ? {} : { body }) });
+  return { response, data: await response.json() };
+}
+function privacy(response, allow) {
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+  if (allow) assert.equal(response.headers.get('allow'), allow);
+}
+const stripeOk = calls => async (...args) => { calls.push(args); return Response.json({ url: 'https://checkout.stripe.com/c/pay/test123' }); };
+
+test('donation checkout uses the configured public origin, not request Host, and returns only URL', async t => {
+  const calls = [];
+  const base = await withDonationServer(t, stripeOk(calls));
+  const { response, data } = await donationRequest(base, '/api/donate', 'POST', 'https://pdf.example.test', '{"amountCents":500,"locale":"en"}');
+  assert.equal(response.status, 201);
+  assert.deepEqual(data, { url: 'https://checkout.stripe.com/c/pay/test123' });
+  privacy(response);
+  const form = new URLSearchParams(calls[0][1].body);
+  assert.equal(form.get('success_url'), 'https://pdf.example.test/?donation=success&session_id={CHECKOUT_SESSION_ID}');
+  assert.equal(form.get('cancel_url'), 'https://pdf.example.test/?donation=cancel');
+  assert.equal(form.get('metadata[donation_context]'), 'pdf_to_markdown');
+  assert.equal(form.get('metadata[app]'), null);
+});
+
+test('donation checkout rejects absent and mismatched origins without contacting Stripe', async t => {
+  const calls = [];
+  const base = await withDonationServer(t, stripeOk(calls));
+  for (const origin of [null, 'http://localhost:3001', 'https://evil.example', 'https://pdf.example.test/']) {
+    const { response } = await donationRequest(base, '/api/donate', 'POST', origin, '{"amountCents":500,"locale":"de"}');
+    assert.equal(response.status, 403);
+    privacy(response);
+  }
+  assert.equal(calls.length, 0);
+  const { response } = await donationRequest(base, '/api/donate', 'POST', 'http://localhost:3000', '{"amountCents":500,"locale":"de"}');
+  assert.equal(response.status, 201);
+  assert.equal(new URLSearchParams(calls[0][1].body).get('cancel_url'), 'http://localhost:3000/?donation=cancel');
+});
+
+test('donation checkout rejects malformed and oversize bodies without contacting Stripe', async t => {
+  const calls = [];
+  const base = await withDonationServer(t, stripeOk(calls));
+  for (const [body, type] of [['{'], ['{"amountCents":500,"locale":"de","url":"evil"}'], ['x'.repeat(2048)], ['{"amountCents":500,"locale":"de"}', 'text/plain'], ['{"amountCents":499,"locale":"de"}']]) {
+    const { response } = await donationRequest(base, '/api/donate', 'POST', 'https://pdf.example.test', body, type);
+    assert.equal(response.status, 400);
+    privacy(response);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('donations are off unless explicitly enabled with a key, and upstream failures are redacted', async t => {
+  for (const options of [{ enabled: false }, { stripeSecretKey: '' }]) {
+    const base = await withDonationServer(t, async () => { throw Error('should not call'); }, options);
+    for (const [route, method, body] of [['/api/donate', 'POST', '{"amountCents":500,"locale":"de"}'], ['/api/donate/status?session_id=cs_test_123abc', 'GET']]) {
+      const { response } = await donationRequest(base, route, method, 'https://pdf.example.test', body);
+      assert.equal(response.status, 503);
+    }
+  }
+  const base = await withDonationServer(t, async () => new Response('Stripe secret error sk_test_123abc', { status: 500 }));
+  const { response, data } = await donationRequest(base, '/api/donate', 'POST', 'https://pdf.example.test', '{"amountCents":500,"locale":"de"}');
+  assert.equal(response.status, 502);
+  assert.doesNotMatch(JSON.stringify(data), /Stripe secret|sk_test/i);
+});
+
+test('donation status returns paid/processing and rejects malformed IDs and extra params', async t => {
+  let session = donationSession;
+  const base = await withDonationServer(t, async () => Response.json(session));
+  for (const [payment, expected] of [['paid', 'paid'], ['unpaid', 'processing']]) {
+    session = { ...donationSession, payment_status: payment };
+    const { response, data } = await donationRequest(base, '/api/donate/status?session_id=cs_test_123abc', 'GET', null);
+    assert.equal(response.status, 200);
+    assert.deepEqual(data, { status: expected });
+    privacy(response);
+  }
+  session = { ...donationSession, metadata: { app: 'pdf2md', sku: 'pass50' } };
+  assert.deepEqual((await donationRequest(base, '/api/donate/status?session_id=cs_test_123abc', 'GET', null)).data, { status: 'not_found' });
+  for (const query of ['session_id=bad', 'session_id=cs_test_1&session_id=cs_test_2', 'session_id=cs_test_123abc&x=1']) {
+    const { response } = await donationRequest(base, `/api/donate/status?${query}`, 'GET', null);
+    assert.equal(response.status, 400);
+  }
+});
+
+test('donation routes reject OPTIONS and unsupported methods with Allow', async t => {
+  const base = await withDonationServer(t, async () => { throw Error('should not call'); });
+  for (const [route, method, allow] of [['/api/donate', 'OPTIONS', 'POST'], ['/api/donate', 'GET', 'POST'], ['/api/donate/status', 'OPTIONS', 'GET'], ['/api/donate/status', 'POST', 'GET']]) {
+    const { response } = await donationRequest(base, route, method, null, method === 'POST' ? '{}' : undefined);
+    assert.equal(response.status, 405);
+    privacy(response, allow);
+  }
+});
+
+test('donation checkout is rate limited per client', async t => {
+  const calls = [];
+  const base = await withDonationServer(t, stripeOk(calls));
+  const statuses = [];
+  for (let i = 0; i < 11; i++) statuses.push((await donationRequest(base, '/api/donate', 'POST', 'https://pdf.example.test', '{"amountCents":500,"locale":"de"}')).response.status);
+  assert.deepEqual(statuses, [...Array(10).fill(201), 429]);
+  assert.equal(calls.length, 10);
+});
+
+test('donation fetch override is refused outside test mode', () => {
+  assert.throws(() => createServer({ token: 'private-only', apiUrl: 'http://127.0.0.1:8000', buildDir: __dirname, paygate: fakePaygate(),
+    publicBaseUrl: 'https://pdf.example.test', cookieSecret: 'x', trustedProxyIp: '192.0.2.8', donationFetch: fetch }), /override refused/);
+});

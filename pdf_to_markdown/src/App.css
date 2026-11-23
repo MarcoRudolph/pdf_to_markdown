@@ -12,6 +12,9 @@ a:hover { color: var(--qc-primary); }
 .brand { color: var(--qc-ink); text-decoration: none; font-size: 16px; font-weight: 700; letter-spacing: -.02em; display: inline-flex; align-items: center; min-height: 44px; }
 .header-pass { color: var(--qc-selected-ink); background: var(--qc-illustration-bg); border-radius: var(--qc-radius-button); text-decoration: none; padding: 12px 16px; font-weight: 650; font-size: 14px; min-height: 44px; display: inline-flex; align-items: center; }
 .header-pass:hover { background: var(--qc-divider); }
+.header-actions { display: flex; align-items: center; gap: 8px; }
+.donate { min-height: 44px; padding: 12px 16px; background: var(--qc-surface); border: 1px solid var(--qc-divider); border-radius: var(--qc-radius-button); color: var(--qc-selected-ink); font-weight: 650; font-size: 14px; cursor: pointer; }
+.donate:hover { background: var(--qc-illustration-bg); }
 .quota-panel, .pass-panel, .payment-message, .restore-result { text-align: left; border: 1px solid var(--qc-divider); border-radius: var(--qc-radius-card); margin-bottom: 20px; }
 .quota-panel { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 24px; background: var(--qc-disabled-bg); }
 .quota-panel strong { font-size: 15px; }
@@ -88,7 +91,25 @@ input[type='file']:disabled { cursor: not-allowed; background: var(--qc-disabled
 .legal a { display: inline-flex; align-items: center; min-height: 44px; }
 .back-link { display: inline-flex; align-items: center; min-height: 44px; }
 .legal-note { padding: 16px; border: 1px solid var(--qc-divider); border-radius: var(--qc-radius-chip); background: var(--qc-disabled-bg); }
+.donation-modal { position: fixed; box-sizing: border-box; width: min(520px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 32px); overflow-y: auto; border: 1px solid var(--qc-divider); border-radius: var(--qc-radius-card); padding: 28px; color: var(--qc-ink); background: var(--qc-surface); box-shadow: 0 16px 48px rgba(0, 0, 0, .18); }
+.donation-modal::backdrop { background: rgba(0, 0, 0, .55); }
+.donation-modal h2 { margin: 0 52px 16px 0; }
+.donation-modal p { line-height: 1.55; }
+.donation-close { position: absolute; top: 16px; right: 16px; min-width: 44px; min-height: 44px; border: 1px solid var(--qc-divider); border-radius: var(--qc-radius-button); background: var(--qc-illustration-bg); color: var(--qc-ink); cursor: pointer; font-size: 24px; }
+.donation-amounts { padding: 0; margin: 20px 0 0; border: 0; min-width: 0; }
+.donation-amounts legend, .donation-amounts label { display: block; font-weight: 600; margin-bottom: 8px; }
+.donation-presets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
+.donation-presets button { min-height: 44px; border: 1px solid var(--qc-input-border); border-radius: var(--qc-radius-button); background: var(--qc-surface); color: var(--qc-ink); cursor: pointer; }
+.donation-presets button[aria-pressed='true'] { background: var(--qc-illustration-bg); border: 2px solid var(--qc-primary); color: var(--qc-selected-ink); font-weight: 700; }
+.donation-custom-control { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 12px; border: 1px solid var(--qc-input-border); border-radius: var(--qc-radius-input); }
+.donation-custom-control:focus-within { outline: 3px solid var(--qc-primary); outline-offset: 2px; }
+.donation-custom-control input { min-width: 0; width: 100%; min-height: 44px; border: 0; outline: none; background: transparent; color: var(--qc-ink); }
+.donation-once { margin: 16px 0; color: var(--qc-muted); }
+.donation-submit { width: 100%; }
+.donation-unavailable { margin: 24px; padding: 16px; background: var(--qc-illustration-bg); color: var(--qc-ink); }
+.donation-unavailable button { min-height: 44px; margin-inline: 12px; }
 @media (max-width: 560px) {
+  .donation-modal { padding: 20px; }
   .header-inner, .footer-inner { padding-inline: 20px; }
   .content { width: calc(100% - 40px); }
   .landing { padding-block: 48px 56px; }

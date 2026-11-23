@@ -36,6 +36,8 @@ function createPayments({ stripe, paygate, stripePriceId, publicBaseUrl, codeSec
         const id = event.data.object.id;
         if (typeof id !== 'string' || !/^cs_[A-Za-z0-9_]+$/.test(id)) { await alert(event, 'invalid_provider_shape'); return { status: 200 }; }
         const session = await stripe.checkout.sessions.retrieve(id, { expand: ['payment_intent.latest_charge'] });
+        // Voluntary donations (donation.mjs) grant nothing and are not paygate purchases.
+        if (session?.id === id && session.metadata?.donation_context === 'pdf_to_markdown' && session.metadata?.app === undefined) return { status: 200 };
         const items = await stripe.checkout.sessions.listLineItems(id, { limit: 2 });
         if (session?.id !== id || !items || !Array.isArray(items.data) || items.data.length !== 1 || items.has_more !== false ||
             items.data[0]?.quantity !== 1 || typeof items.data[0]?.price !== 'object' || !items.data[0].price) {
