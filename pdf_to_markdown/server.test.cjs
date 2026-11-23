@@ -1,6 +1,9 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const net = require('node:net');
+const { Readable } = require('node:stream');
+const { parsePdf } = require('./upload.cjs');
 const { createServer, createConfiguredServer } = require('./server.cjs');
 const { createPaygate } = require('./paygate.cjs');
 const MiB = 1048576;
@@ -238,6 +241,157 @@ test('startup rejects any other active paid product with a non-day period or une
       activeProducts: async () => [bad] }), /product|quota/i);
     assert.equal(closed, true);
   }
+});
+
+test('invalid bearer token is rejected before any reservation or startup', () => {
+  assert.throws(() => createServer({ token: 'bad\nheader', apiUrl: 'http://127.0.0.1:8000', buildDir: __dirname,
+    paygate: fakePaygate(), publicBaseUrl: 'https://pdf.example.test', cookieSecret: 'test-cookie-secret',
+    trustedProxyIp: '192.0.2.8' }), /API_TOKEN/);
+});
+
+test('synchronous upstream request and write exceptions after reservation refund saved day once', async t => {
+  const { port, paygate, seen } = await harness(t);
+  const original = http.request;
+  const logged = []; const priorError = console.error;
+  console.error = (...args) => logged.push(args);
+  try {
+    http.request = (url, options, onResponse) => {
+      if (url instanceof URL && url.pathname === '/v1/convert') throw Error('request secret');
+      return original(url, options, onResponse);
+    };
+    const first = await request(port, multipart(pdf(100)));
+    assert.equal(first.status, 502);
+    assert.doesNotMatch(first.body, /secret/);
+    http.request = (url, options, onResponse) => {
+      if (url instanceof URL && url.pathname === '/v1/convert') {
+        const proxy = original(url, options, onResponse);
+        proxy.write = () => { throw Error('write secret'); };
+        return proxy;
+      }
+      return original(url, options, onResponse);
+    };
+    const second = await request(port, multipart(pdf(100)));
+    assert.equal(second.status, 502);
+    assert.deepEqual(paygate.calls.filter(call => call[0] === 'refundFree').map(call => call.slice(2)),
+      [['day-bound-ip', '2026-10-25'], ['day-bound-ip', '2026-10-25']]);
+    assert.equal(seen.length, 0);
+    assert.doesNotMatch(JSON.stringify(logged), /request secret|write secret/);
+  } finally { http.request = original; console.error = priorError; }
+});
+
+test('strict multipart rejects trailing bytes after closing delimiter, including file-shaped data', async t => {
+  const { port, paygate, seen } = await harness(t);
+  const valid = multipart(pdf(100));
+  for (const tail of [Buffer.from('EXTRA'), Buffer.from('--incoming\r\nContent-Disposition: form-data; name="file"; filename="second.pdf"\r\n\r\n%PDF-1.7\n\r\n--incoming--\r\n')]) {
+    assert.equal((await request(port, Buffer.concat([valid, tail]))).status, 400);
+  }
+  assert.equal(paygate.calls.length, 0);
+  assert.equal(seen.length, 0);
+});
+
+test('multipart parser avoids full-file Buffer.concat while retaining a single bounded PDF buffer', async () => {
+  const file = pdf(3 * MiB);
+  const body = multipart(file);
+  const req = Readable.from(Array.from({ length: Math.ceil(body.length / 16384) }, (_, n) => body.subarray(n * 16384, (n + 1) * 16384)));
+  req.headers = { 'content-type': 'multipart/form-data; boundary=incoming' };
+  const original = Buffer.concat;
+  let largestConcatenation = 0;
+  Buffer.concat = function (buffers, ...rest) {
+    largestConcatenation = Math.max(largestConcatenation, buffers.reduce((sum, chunk) => sum + chunk.length, 0));
+    return original.call(this, buffers, ...rest);
+  };
+  try {
+    const parsed = await parsePdf(req);
+    assert.deepEqual(parsed, file);
+    assert.ok(largestConcatenation < 65536, `full-file concat of ${largestConcatenation} bytes`);
+  } finally { Buffer.concat = original; }
+});
+
+test('binary PDF with boundary-shaped bytes survives and split multipart delimiters reject trailing data', async t => {
+  const { port, paygate, seen } = await harness(t);
+  const binary = Buffer.concat([Buffer.from('%PDF-1.7\n\x00\xff\r\n--incominX\r\n'), Buffer.alloc(256, 0xa5)]);
+  assert.equal((await request(port, multipart(binary))).status, 200);
+  assert.ok(seen[0].body.includes(binary));
+  const ambiguous = Buffer.concat([Buffer.from('%PDF-1.7\n\x00\xff\r\n--incoming-X\r\n'), Buffer.alloc(256, 0xa5)]);
+  assert.equal((await request(port, multipart(ambiguous))).status, 400);
+  const file = multipart(pdf(100));
+  for (const extra of [Buffer.concat([file, Buffer.from('TRAILING')]), multipart(pdf(100), { second: true })]) {
+    const result = await new Promise((resolve, reject) => {
+      const req = http.request({ hostname: '127.0.0.1', port, path: '/v1/convert', method: 'POST', headers: {
+        origin: 'http://localhost:3000', 'content-type': 'multipart/form-data; boundary=incoming',
+        'content-length': extra.length,
+      } }, res => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+      req.on('error', reject);
+      for (let i = 0; i < extra.length; i += 3) req.write(extra.subarray(i, i + 3));
+      req.end();
+    });
+    assert.equal(result, 400);
+  }
+  assert.deepEqual(paygate.calls.map(call => call[0]), ['free']);
+});
+
+test('raw forged Content-Length shorter than multipart cannot bypass parser or consume', async t => {
+  const { port, paygate, seen } = await harness(t);
+  const body = multipart(pdf(100));
+  const response = await new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1');
+    const chunks = [];
+    socket.setTimeout(1500, () => socket.destroy(Error('raw request timed out')));
+    socket.on('connect', () => {
+      socket.write(`POST /v1/convert HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://localhost:3000\r\nContent-Type: multipart/form-data; boundary=incoming\r\nContent-Length: 40\r\nConnection: close\r\n\r\n`);
+      socket.end(body);
+    });
+    socket.on('data', chunk => chunks.push(chunk));
+    socket.on('end', () => resolve(Buffer.concat(chunks).toString('latin1')));
+    socket.on('error', reject);
+  });
+  assert.match(response, /^HTTP\/1\.1 400 /);
+  assert.equal(paygate.calls.length, 0);
+  assert.equal(seen.length, 0);
+});
+
+test('browser abort after upstream 200 commits unit without refund', async t => {
+  let upstream200, browser200;
+  const got200 = new Promise(resolve => { upstream200 = resolve; });
+  const gotBrowser200 = new Promise(resolve => { browser200 = resolve; });
+  const gate = fakePaygate();
+  const { port } = await harness(t, { paygate: gate, upstreamHandler(req, res) {
+    res.writeHead(200, { 'content-type': 'text/markdown' });
+    res.write('partial');
+    upstream200();
+  } });
+  const req = http.request({ hostname: '127.0.0.1', port, path: '/v1/convert', method: 'POST', headers: {
+    origin: 'http://localhost:3000', 'content-type': 'multipart/form-data; boundary=incoming',
+  } }, res => { assert.equal(res.statusCode, 200); browser200(); res.destroy(); });
+  req.on('error', () => {});
+  try {
+    req.end(multipart(pdf(100)));
+    await got200;
+    await gotBrowser200;
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(gate.calls.filter(call => call[0].startsWith('refund')).length, 0);
+  } finally { req.destroy(); }
+});
+
+test('exactly 10 MiB file remains paid-eligible without an extra allocation', async t => {
+  const { port, paygate, seen } = await harness(t);
+  const result = await request(port, multipart(pdf(10 * MiB)));
+  assert.equal(result.status, 200);
+  assert.deepEqual(paygate.calls.map(call => call[0]), ['paid']);
+  assert.equal(seen.length, 1);
+});
+
+test('configured startup rejects invalid API_TOKEN before constructing a paygate client', async () => {
+  const secrets = [
+    '9b6f38e4a1d20c7f5e83b49a6d1f072c8e35b9a4f60d217ce98b543af106d82e',
+    '71e5a92b4c03f8d65a1b7e90c2d43f6a8b5e197c04d2a63f9b0e85c71d4a2f36',
+    '84d31f7a9b20c56e1d48f3a70b25e69c4f18d03a72b56e91c8a4f0d37b26e59a',
+  ];
+  const env = { API_TOKEN: 'bad\nheader', PAYGATE_DATABASE_URL: 'postgresql://paygate_pdf2md:password@127.0.0.1:5433/paygate',
+    PAYGATE_IP_SECRET: secrets[0], PAYGATE_CODE_SECRET: secrets[1], PAYGATE_COOKIE_SECRET: secrets[2],
+    STRIPE_SECRET_KEY: 'sk_test', STRIPE_WEBHOOK_SECRET: 'whsec_test', STRIPE_PRICE_ID: 'price_test',
+    PUBLIC_BASE_URL: 'https://pdf.example.test', TRUSTED_PROXY_IP: '192.0.2.8' };
+  await assert.rejects(createConfiguredServer(env, { paygateFactory: () => { throw Error('client constructed'); } }), /API_TOKEN/);
 });
 
 test('server refuses missing secret at startup', () => {

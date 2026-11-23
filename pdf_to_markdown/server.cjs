@@ -13,6 +13,8 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 
 function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false, testHandlers, testCraOrigin }) {
   if (!token) throw new Error('API_TOKEN must be set on the server');
+  try { http.validateHeaderValue('authorization', `Bearer ${token}`); }
+  catch { throw new Error('Invalid API_TOKEN'); }
   if (!paygate && !testMode) throw new Error('paygate required outside explicit test mode');
   if (!testMode && (testHandlers || testCraOrigin)) throw new Error('Test-only route/origin override refused');
   if (!publicBaseUrl || !cookieSecret || !isIP(trustedProxyIp)) throw new Error('PUBLIC_BASE_URL, PAYGATE_COOKIE_SECRET and TRUSTED_PROXY_IP required');
@@ -58,44 +60,62 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl,
       } catch { reconcile('refund_failed'); }
     }
     if (res.destroyed) { await settle('definitive'); return; }
-    const boundary = 'pdf2md-' + randomBytes(18).toString('hex');
-    const prefix = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="document.pdf"\r\nContent-Type: application/pdf\r\n\r\n`);
-    const suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
-    await new Promise(resolve => {
-      let done = false, sent = false;
-      const finish = async (status, message, reason) => {
-        if (done) return;
-        done = true;
-        if (reason) await settle(reason);
-        if (status) reject(status, message);
-        resolve();
-      };
-      const proxy = client.request(new URL('/v1/convert', upstream), { method: 'POST', headers: {
-        authorization: `Bearer ${token}`, 'content-type': `multipart/form-data; boundary=${boundary}`,
-        'content-length': prefix.length + file.length + suffix.length,
-      } }, response => {
-        if (done) return response.resume();
-        if (response.statusCode === 200) {
-          received200 = true; settled = true;
-          res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'content-disposition': 'attachment; filename="document.md"' });
-          response.pipe(res);
-          response.once('end', () => finish());
-          response.once('aborted', () => { res.destroy(); finish(); });
-          response.once('error', () => { res.destroy(); finish(); });
-        } else {
-          response.resume();
-          const status = [400, 422].includes(response.statusCode) ? response.statusCode : 502;
-          finish(status, status === 422 ? 'PDF cannot be converted' : 'Conversion failed', 'definitive');
+    try {
+      const boundary = 'pdf2md-' + randomBytes(18).toString('hex');
+      const prefix = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="document.pdf"\r\nContent-Type: application/pdf\r\n\r\n`);
+      const suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
+      await new Promise(resolve => {
+        let done = false, sent = false, proxy;
+        const finish = async (status, message, reason) => {
+          if (done) return;
+          done = true;
+          if (reason) await settle(reason);
+          if (status) reject(status, message);
+          resolve();
+        };
+        try {
+          proxy = client.request(new URL('/v1/convert', upstream), { method: 'POST', headers: {
+            authorization: `Bearer ${token}`, 'content-type': `multipart/form-data; boundary=${boundary}`,
+            'content-length': prefix.length + file.length + suffix.length,
+          } }, response => {
+            if (done) return response.resume();
+            try {
+              if (response.statusCode === 200) {
+                received200 = true; settled = true;
+                res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'content-disposition': 'attachment; filename="document.md"' });
+                response.pipe(res);
+                response.once('end', () => finish());
+                response.once('aborted', () => { res.destroy(); finish(); });
+                response.once('error', () => { res.destroy(); finish(); });
+              } else {
+                response.resume();
+                const status = [400, 422].includes(response.statusCode) ? response.statusCode : 502;
+                finish(status, status === 422 ? 'PDF cannot be converted' : 'Conversion failed', 'definitive');
+              }
+            } catch {
+              response.destroy();
+              finish(received200 ? null : 502, 'Conversion unavailable', received200 ? null : 'definitive');
+            }
+          });
+          proxy.once('error', () => finish(502, 'Conversion unavailable', sent ? 'uncertain' : 'definitive'));
+          proxy.setTimeout(60000, () => proxy.destroy());
+          res.once('close', () => {
+            if (!done && !received200) { proxy.destroy(); finish(null, null, sent ? 'uncertain' : 'definitive'); }
+            else if (!done) { proxy.destroy(); finish(); }
+          });
+          proxy.write(prefix);
+          sent = true;
+          proxy.write(file);
+          proxy.end(suffix);
+        } catch {
+          if (proxy) proxy.destroy();
+          finish(502, 'Conversion unavailable', sent ? 'uncertain' : 'definitive');
         }
       });
-      proxy.setTimeout(60000, () => proxy.destroy());
-      proxy.once('error', () => finish(502, 'Conversion unavailable', sent ? 'uncertain' : 'definitive'));
-      res.once('close', () => { if (!done && !received200) { proxy.destroy(); finish(null, null, sent ? 'uncertain' : 'definitive'); } else if (!done) finish(); });
-      proxy.write(prefix);
-      proxy.write(file);
-      proxy.end(suffix);
-      sent = true;
-    });
+    } catch {
+      await settle('definitive');
+      reject(502, 'Conversion unavailable');
+    }
   }
   return http.createServer((req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -173,6 +193,8 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl,
 function validatedConfig(env) {
   const required = ['API_TOKEN', 'PAYGATE_DATABASE_URL', 'PAYGATE_IP_SECRET', 'PAYGATE_CODE_SECRET', 'PAYGATE_COOKIE_SECRET', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'STRIPE_PRICE_ID', 'PUBLIC_BASE_URL', 'TRUSTED_PROXY_IP'];
   for (const key of required) if (!env[key] || !String(env[key]).trim()) throw new Error(`${key} required`);
+  try { http.validateHeaderValue('authorization', `Bearer ${env.API_TOKEN}`); }
+  catch { throw new Error('Invalid API_TOKEN'); }
   let database, base;
   try { database = new URL(env.PAYGATE_DATABASE_URL); } catch { throw new Error('Invalid PAYGATE_DATABASE_URL'); }
   if (!['postgres:', 'postgresql:'].includes(database.protocol) || database.username !== 'paygate_pdf2md' || !database.password || database.pathname !== '/paygate') throw new Error('Invalid PAYGATE_DATABASE_URL role/database');
