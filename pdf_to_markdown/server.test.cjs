@@ -192,9 +192,9 @@ test('fake DB transactions retain DB-selected Berlin day and IP hash across midn
     statements.push({ transaction, text, values: statement.values });
     if (text === 'BEGIN') return { rows: [] };
     if (text.includes("at time zone 'Europe/Berlin'")) return { rows: [{ day: days[transaction] }] };
-    if (text.includes('paygate.quota(')) return { rows: [{ quota: { free: { units_left: 2, limits: {} }, paid: [] } }] };
-    if (text.includes('consume_free')) return { rows: [{ consumed: true }] };
-    if (text.includes('consume_paid')) return { rows: [{ consumed: { entitlement_id: 'pass-one' } }] };
+    if (text === 'select paygate.quota_pdf2md($1,$2) as quota') return { rows: [{ quota: { free: { units_left: 2, limits: {} }, paid: [] } }] };
+    if (text === 'select paygate.consume_pdf2md_free($1,$2) as consumed') return { rows: [{ consumed: true }] };
+    if (text === 'select paygate.consume_pdf2md_paid($1) as consumed') return { rows: [{ consumed: { entitlement_id: 'pass-one' } }] };
     return { rows: [] };
   }, release() {} }; }, async query(statement) { statements.push({ transaction, text: statement.text, values: statement.values }); return { rows: [{ refunded: true }] }; }, async end() {} };
   const gate = createPaygate({ ipSecret: 'x'.repeat(32), pool });

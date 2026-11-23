@@ -33,8 +33,8 @@ test('quota pins Berlin day and hashes IP only in parameters on the same transac
   assert.equal(result.day, day);
   assert.equal(result.free.units_left, 5);
   assert.match(f.calls[1].text, /Europe\/Berlin/);
-  assert.match(f.calls[2].text, /select paygate\.quota\(\$1,\$2,\$3\)/i);
-  assert.deepEqual(f.calls[2].values, ['pdf2md', subject, createHmac('sha256', ipSecret).update(ip + '|' + day).digest('hex')]);
+  assert.equal(f.calls[2].text, 'select paygate.quota_pdf2md($1,$2) as quota');
+  assert.deepEqual(f.calls[2].values, [subject, createHmac('sha256', ipSecret).update(ip + '|' + day).digest('hex')]);
   assert.equal(f.calls[0].text, 'BEGIN');
   assert.equal(f.calls[3].text, 'COMMIT');
   assert.ok(f.calls.some(c => c.release));
@@ -45,8 +45,8 @@ test('reservePaid returns selected day and consumed entitlement or null', async 
     const f = fakePool([{ rows: [] }, { rows: [{ day: '2026-11-22' }] }, { rows: [{ consumed: consumption }] }, { rows: [] }]);
     const got = await createPaygate({ databaseUrl: 'unused', ipSecret, pool: f.pool }).reservePaid(subject);
     assert.deepEqual(got, consumption ? { day: '2026-11-22', ...consumption } : null);
-    assert.match(f.calls[2].text, /paygate\.consume_paid\(\$1,\$2\)/);
-    assert.deepEqual(f.calls[2].values, ['pdf2md', subject]);
+    assert.equal(f.calls[2].text, 'select paygate.consume_pdf2md_paid($1) as consumed');
+    assert.deepEqual(f.calls[2].values, [subject]);
   }
 });
 
@@ -67,6 +67,8 @@ test('free reservation and paid refund use saved DB day after Berlin midnight', 
   assert.equal(reserved.day, '2026-11-22');
   assert.equal(reserved.units, 1);
   assert.match(reserved.ipHash, /^[0-9a-f]{64}$/);
+  assert.equal(f.calls[2].text, 'select paygate.consume_pdf2md_free($1,$2) as consumed');
+  assert.deepEqual(f.calls[2].values, [subject, reserved.ipHash]);
   assert.equal(await gate.refundFreeDay(subject, reserved.ipHash, reserved.day), 2);
   assert.equal(await gate.refundPaidDay('00000000-0000-4000-8000-000000000001', reserved.day), 1);
   assert.equal(f.calls.length, 7); // no second day lookup or current-day refund
@@ -159,10 +161,21 @@ test('production adapter refuses conversion until quota routing is installed', a
 });
 
 test('startup verifies DB role and product via parameterized read, then accepts matching config', async () => {
-  const f = fakePool([{ rows: [seeded] }]);
+  const f = fakePool([{ rows: [{ ...seeded, scoped_quota: true, scoped_free: true, scoped_paid: true, generic_quota: false, generic_free: false, generic_paid: false }] }]);
   const gate = createPaygate({ databaseUrl: 'unused', ipSecret, pool: f.pool });
   const server = await createConfiguredServer(config(), { paygateFactory: () => gate, stripeFactory: () => ({}) });
   assert.deepEqual(f.calls[0].values, ['pdf2md', 'pass50']);
   assert.match(f.calls[0].text, /current_user/);
   server.close();
+});
+
+test('startup fails closed when generic quota or consume remains executable or scoped wrappers are absent', async () => {
+  for (const badPrivilege of ['generic_quota', 'generic_free', 'generic_paid', 'scoped_quota', 'scoped_free', 'scoped_paid']) {
+    const safe = { ...seeded, scoped_quota: true, scoped_free: true, scoped_paid: true, generic_quota: false, generic_free: false, generic_paid: false };
+    safe[badPrivilege] = badPrivilege.startsWith('generic_');
+    const f = fakePool([{ rows: [safe] }]);
+    const gate = createPaygate({ databaseUrl: 'unused', ipSecret, pool: f.pool });
+    await assert.rejects(createConfiguredServer(config(), { paygateFactory: () => gate, stripeFactory: () => ({}) }), /paygate/i);
+    assert.match(f.calls[0].text, /has_function_privilege/);
+  }
 });

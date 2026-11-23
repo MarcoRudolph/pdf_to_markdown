@@ -1,4 +1,4 @@
--- Disposable handoff database ONLY. Requires base, seed, 020 and 025; no real data survives.
+-- Disposable handoff database ONLY. Requires base, seed, 020, 025 and 030; no real data survives.
 BEGIN;
 DO $$
 DECLARE
@@ -40,6 +40,33 @@ BEGIN
   PERFORM paygate.pdf2md_record_anomaly(repeat('9',64),'missing_email');
   ASSERT (SELECT reason FROM paygate.pdf2md_webhook_anomalies WHERE event_hash=repeat('9',64))='missing_email', 'durable coded alert';
 END $$;
+-- A second app exposes a regression in any generic grant; everything rolls back.
+INSERT INTO paygate.apps(id,name,free_units_per_day) VALUES('scope-probe','Scope probe',5);
+SET ROLE paygate_pdf2md;
+DO $$
+DECLARE fn text; denied boolean;
+BEGIN
+  FOREACH fn IN ARRAY ARRAY['paygate.quota','paygate.consume_free','paygate.consume_paid'] LOOP
+    denied := false;
+    BEGIN
+      IF fn = 'paygate.consume_paid' THEN
+        PERFORM paygate.consume_paid('scope-probe',repeat('7',64));
+      ELSE
+        EXECUTE format('select %s(''scope-probe'',repeat(''7'',64),repeat(''8'',64))',fn);
+      END IF;
+    EXCEPTION WHEN insufficient_privilege THEN denied := true;
+    END;
+    ASSERT denied, 'generic cross-app RPC executable: ' || fn;
+  END LOOP;
+  ASSERT paygate.quota_pdf2md(repeat('7',64),repeat('8',64)) IS NOT NULL, 'scoped quota';
+  ASSERT paygate.consume_pdf2md_free(repeat('7',64),repeat('8',64)), 'scoped free';
+  PERFORM paygate.consume_pdf2md_paid(repeat('7',64));
+END $$;
+RESET ROLE;
+DO $$ BEGIN
+  ASSERT NOT EXISTS (SELECT 1 FROM paygate.free_usage WHERE app_id='scope-probe'), 'cross-app counter changed';
+  ASSERT EXISTS (SELECT 1 FROM paygate.free_usage WHERE app_id='pdf2md' AND key_hash=repeat('7',64)), 'scoped counter missing';
+END $$;
 -- Dedicated role can execute only the intended RPCs and read only public configuration.
 DO $$
 DECLARE fn text;
@@ -47,8 +74,8 @@ BEGIN
   ASSERT has_table_privilege('paygate_pdf2md','paygate.apps','SELECT'), 'apps config';
   ASSERT has_table_privilege('paygate_pdf2md','paygate.products','SELECT'), 'products config';
   FOREACH fn IN ARRAY ARRAY[
-    'paygate.quota(text,text,text)','paygate.consume_free(text,text,text)',
-    'paygate.consume_paid(text,text)','paygate.checkout_fulfilled(text,text)',
+    'paygate.quota_pdf2md(text,text)','paygate.consume_pdf2md_free(text,text)',
+    'paygate.consume_pdf2md_paid(text)','paygate.checkout_fulfilled(text,text)',
     'paygate.pdf2md_fulfill_guarded(text,text,text,text,text,text)',
     'paygate.pdf2md_record_reversal(text,text)',
     'paygate.redeem_pdf2md_entitlement(text,text,int)',
@@ -60,7 +87,9 @@ BEGIN
   FOREACH fn IN ARRAY ARRAY[
     'paygate.fulfill_purchase(text,text,text,text,text,int,text,text,text,text,text,timestamptz)',
     'paygate.refund_purchase(text,text)','paygate.redeem_code(text,text,text,int)',
-    'paygate.refund_free(text,text,text)','paygate.refund_paid(uuid)'
+    'paygate.refund_free(text,text,text)','paygate.refund_paid(uuid)',
+    'paygate.quota(text,text,text)','paygate.consume_free(text,text,text)',
+    'paygate.consume_paid(text,text)'
   ] LOOP
     ASSERT NOT has_function_privilege('paygate_pdf2md',fn,'EXECUTE'), 'broad base function exposed';
   END LOOP;

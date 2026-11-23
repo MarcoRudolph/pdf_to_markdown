@@ -25,14 +25,25 @@ function createPaygate({ databaseUrl, ipSecret, pool = new Pool({ connectionStri
       const { rows } = await pool.query({ text: `select current_user as role, a.active as app_active, a.timezone,
         a.free_units_per_day, a.free_units_per_day_ip, a.free_limits,
         p.active as product_active, p.amount_cents, p.currency, p.units, p.quota_period,
-        p.valid_days, p.limits, p.stripe_price_id
+        p.valid_days, p.limits, p.stripe_price_id,
+        has_function_privilege(current_user, 'paygate.quota_pdf2md(text,text)', 'EXECUTE') as scoped_quota,
+        has_function_privilege(current_user, 'paygate.consume_pdf2md_free(text,text)', 'EXECUTE') as scoped_free,
+        has_function_privilege(current_user, 'paygate.consume_pdf2md_paid(text)', 'EXECUTE') as scoped_paid,
+        has_function_privilege(current_user, 'paygate.quota(text,text,text)', 'EXECUTE') as generic_quota,
+        has_function_privilege(current_user, 'paygate.consume_free(text,text,text)', 'EXECUTE') as generic_free,
+        has_function_privilege(current_user, 'paygate.consume_paid(text,text)', 'EXECUTE') as generic_paid
         from paygate.apps a join paygate.products p on p.app_id = a.id
         where a.id = $1 and p.sku = $2`, values: [APP, 'pass50'] });
-      return rows[0] || null;
+      const row = rows[0];
+      if (!row || !row.scoped_quota || !row.scoped_free || !row.scoped_paid ||
+          row.generic_quota || row.generic_free || row.generic_paid) {
+        throw new Error('paygate scoped quota privileges missing or generic grants remain (030 required)');
+      }
+      return row;
     },
     quota(subjectHash, clientIp) {
       return transaction(async (client, day) => {
-        const { rows } = await client.query({ text: 'select paygate.quota($1,$2,$3) as quota', values: [APP, subjectHash, ipHash(clientIp, day)] });
+        const { rows } = await client.query({ text: 'select paygate.quota_pdf2md($1,$2) as quota', values: [subjectHash, ipHash(clientIp, day)] });
         if (!rows[0]?.quota) throw new Error('paygate quota unavailable');
         return { day, ...rows[0].quota };
       });
@@ -40,13 +51,13 @@ function createPaygate({ databaseUrl, ipSecret, pool = new Pool({ connectionStri
     reserveFree(subjectHash, clientIp) {
       return transaction(async (client, day) => {
         const hashedIp = ipHash(clientIp, day);
-        const { rows } = await client.query({ text: 'select paygate.consume_free($1,$2,$3) as consumed', values: [APP, subjectHash, hashedIp] });
+        const { rows } = await client.query({ text: 'select paygate.consume_pdf2md_free($1,$2) as consumed', values: [subjectHash, hashedIp] });
         return rows[0]?.consumed ? { day, subjectHash, ipHash: hashedIp, units: 1 } : null;
       });
     },
     reservePaid(subjectHash) {
       return transaction(async (client, day) => {
-        const { rows } = await client.query({ text: 'select paygate.consume_paid($1,$2) as consumed', values: [APP, subjectHash] });
+        const { rows } = await client.query({ text: 'select paygate.consume_pdf2md_paid($1) as consumed', values: [subjectHash] });
         return rows[0]?.consumed ? { day, ...rows[0].consumed } : null;
       });
     },
