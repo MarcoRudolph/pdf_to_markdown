@@ -6,8 +6,9 @@ const { URL } = require('node:url');
 const { isIP } = require('node:net');
 const { createPaygate } = require('./paygate.cjs');
 const { identityFor } = require('./identity.cjs');
+const { randomBytes } = require('node:crypto');
+const { parsePdf, LIMIT } = require('./upload.cjs');
 
-const MAX_REQUEST = 10485760 + 65536; // PDF limit plus multipart headers/boundary.
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.ico': 'image/x-icon', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8' };
 
 function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false, testHandlers, testCraOrigin }) {
@@ -20,12 +21,101 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl,
   const upstream = new URL(apiUrl);
   if (!['http:', 'https:'].includes(upstream.protocol) || upstream.username || upstream.password || upstream.pathname !== '/') throw new Error('Invalid API_URL');
   const client = upstream.protocol === 'https:' ? require('node:https') : http;
+  let activeUploads = 0;
+  async function convert(req, res, identity) {
+    const reject = (status, message, json = false) => {
+      if (!res.headersSent && !res.destroyed) {
+        res.writeHead(status, { 'content-type': json ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8' });
+        res.end(json ? JSON.stringify({ error: message }) : message);
+      }
+    };
+    if (!/^multipart\/form-data(?:;|$)/i.test(req.headers['content-type'] || '')) return reject(400, 'Expected PDF upload');
+    let file;
+    try { file = await parsePdf(req); }
+    catch (error) { return reject(error.status === 413 ? 413 : 400, error.status === 413 ? 'PDF exceeds size limit' : 'Expected PDF upload'); }
+    if (res.destroyed) return;
+    if (file.length > LIMIT) return reject(413, 'PDF exceeds size limit');
+    let reservation, kind;
+    try {
+      if (file.length <= 1048576) { reservation = await paygate.reserveFree(identity.subjectHash, identity.clientIp); kind = 'free'; }
+      if (!reservation) { reservation = await paygate.reservePaid(identity.subjectHash); kind = 'paid'; }
+    } catch { return reject(503, 'Quota unavailable'); }
+    if (!reservation) return reject(402, 'payment_required', true);
+    const reconcile = reason => console.error('pdf2md reconciliation required', {
+      reason, day: reservation.day, subjectHash: identity.subjectHash,
+      ...(kind === 'paid' ? { entitlementId: reservation.entitlement_id } : { ipHash: reservation.ipHash }),
+    });
+    let settled = false, received200 = false;
+    async function settle(reason) {
+      if (settled || received200) return;
+      settled = true;
+      if (reason === 'uncertain') { reconcile('upstream_outcome_unknown'); return; }
+      try {
+        const refunded = kind === 'free'
+          ? await paygate.refundFreeDay(reservation.subjectHash, reservation.ipHash, reservation.day)
+          : await paygate.refundPaidDay(reservation.entitlement_id, reservation.day);
+        if (!refunded) reconcile('refund_not_confirmed');
+      } catch { reconcile('refund_failed'); }
+    }
+    if (res.destroyed) { await settle('definitive'); return; }
+    const boundary = 'pdf2md-' + randomBytes(18).toString('hex');
+    const prefix = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="document.pdf"\r\nContent-Type: application/pdf\r\n\r\n`);
+    const suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
+    await new Promise(resolve => {
+      let done = false, sent = false;
+      const finish = async (status, message, reason) => {
+        if (done) return;
+        done = true;
+        if (reason) await settle(reason);
+        if (status) reject(status, message);
+        resolve();
+      };
+      const proxy = client.request(new URL('/v1/convert', upstream), { method: 'POST', headers: {
+        authorization: `Bearer ${token}`, 'content-type': `multipart/form-data; boundary=${boundary}`,
+        'content-length': prefix.length + file.length + suffix.length,
+      } }, response => {
+        if (done) return response.resume();
+        if (response.statusCode === 200) {
+          received200 = true; settled = true;
+          res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'content-disposition': 'attachment; filename="document.md"' });
+          response.pipe(res);
+          response.once('end', () => finish());
+          response.once('aborted', () => { res.destroy(); finish(); });
+          response.once('error', () => { res.destroy(); finish(); });
+        } else {
+          response.resume();
+          const status = [400, 422].includes(response.statusCode) ? response.statusCode : 502;
+          finish(status, status === 422 ? 'PDF cannot be converted' : 'Conversion failed', 'definitive');
+        }
+      });
+      proxy.setTimeout(60000, () => proxy.destroy());
+      proxy.once('error', () => finish(502, 'Conversion unavailable', sent ? 'uncertain' : 'definitive'));
+      res.once('close', () => { if (!done && !received200) { proxy.destroy(); finish(null, null, sent ? 'uncertain' : 'definitive'); } else if (!done) finish(); });
+      proxy.write(prefix);
+      proxy.write(file);
+      proxy.end(suffix);
+      sent = true;
+    });
+  }
   return http.createServer((req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'");
     function reject(status, message) { if (!res.headersSent) { res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }); res.end(message); } }
     const pathname = new URL(req.url, 'http://localhost').pathname;
+    let release = () => {};
+    let conversionRunning = false;
+    if (pathname === '/v1/convert' && req.method === 'POST') {
+      if (activeUploads >= 8) {
+        res.writeHead(429, { 'Retry-After': '1', Connection: 'close', 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Upload capacity exhausted');
+        return;
+      }
+      activeUploads++;
+      let released = false;
+      release = () => { if (!released) { released = true; activeUploads--; } };
+      res.once('close', () => { if (!conversionRunning) release(); });
+    }
     const protectedPost = ['/v1/convert', '/v1/checkout', '/v1/redeem'];
     const protectedGet = ['/v1/quota', '/v1/checkout-status'];
     if ((req.method === 'POST' && protectedPost.includes(pathname)) || (req.method === 'GET' && protectedGet.includes(pathname))) {
@@ -40,54 +130,29 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl,
         }
         if (!valid) return reject(403, 'Forbidden');
       }
-      // No live route yet for Task 3/4: only explicit test-mode handlers exercise this common guard.
-      if (pathname !== '/v1/convert' && !(testMode && testHandlers?.[pathname])) return reject(405, 'Method not allowed');
+      if (!['/v1/convert', '/v1/quota'].includes(pathname) && !(testMode && testHandlers?.[pathname])) return reject(405, 'Method not allowed');
       let identity;
       try { identity = identityFor(req, res, { cookieSecret, trustedProxyIp }); }
       catch { return reject(503, 'Client IP unavailable'); }
       if (testMode && testHandlers?.[pathname]) return testHandlers[pathname](req, res, identity);
-    }
-    if (pathname === '/v1/convert') {
-      if (req.method !== 'POST') return reject(405, 'Method not allowed');
-      // Task 3 wires reservations; never expose an unmetered production path.
-      if (paygate) return reject(503, 'Conversion temporarily unavailable');
-      if (!/^multipart\/form-data;\s*boundary=/.test(req.headers['content-type'] || '')) return reject(400, 'Expected PDF upload');
-      if (Number(req.headers['content-length']) > MAX_REQUEST) {
-        req.on('end', () => reject(413, 'PDF exceeds size limit'));
-        req.resume(); // drain without buffering; avoid resetting a client still sending
+      if (pathname === '/v1/quota') {
+        if (!paygate) return reject(503, 'Quota unavailable');
+        paygate.quota(identity.subjectHash, identity.clientIp).then(quota => {
+          if (!res.destroyed) {
+            const free = { ...quota.free, limits: { ...quota.free.limits, max_file_bytes: 1048576 } };
+            const paid = quota.paid.map(pass => ({ ...pass, limits: { ...pass.limits, max_file_bytes: LIMIT } }));
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+            res.end(JSON.stringify({ free, paid }));
+          }
+        }).catch(() => reject(503, 'Quota unavailable'));
         return;
       }
-      let bytes = 0, stopped = false;
-      const proxy = client.request(new URL('/v1/convert', upstream), { method: 'POST', headers: {
-        'authorization': `Bearer ${token}`,
-        'content-type': req.headers['content-type'],
-        ...(req.headers['content-length'] ? { 'content-length': req.headers['content-length'] } : {}),
-      } }, response => {
-        if (stopped) return response.resume();
-        const allowed = [200, 400, 401, 413, 422].includes(response.statusCode) ? response.statusCode : 502;
-        if (allowed === 200) {
-          res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', 'content-disposition': 'attachment; filename="document.md"' });
-          response.pipe(res);
-        } else {
-          response.resume(); // never reflect upstream details to a user
-          reject(allowed, allowed === 413 ? 'PDF exceeds size limit' : allowed === 422 ? 'PDF cannot be converted' : 'Conversion failed');
-        }
-      });
-      proxy.setTimeout(60000, () => proxy.destroy());
-      proxy.on('error', () => { if (!stopped) reject(502, 'Conversion unavailable'); });
-      req.on('data', chunk => {
-        bytes += chunk.length;
-        if (bytes > MAX_REQUEST && !stopped) {
-          stopped = true;
-          proxy.destroy();
-          reject(413, 'PDF exceeds size limit');
-          req.resume();
-        } else if (!stopped && !proxy.write(chunk)) req.pause();
-      });
-      proxy.on('drain', () => req.resume());
-      req.on('end', () => { if (!stopped) proxy.end(); });
-      req.on('aborted', () => proxy.destroy());
-      return;
+      if (pathname === '/v1/convert') {
+        if (!paygate || !['reserveFree', 'reservePaid', 'refundFreeDay', 'refundPaidDay'].every(method => typeof paygate[method] === 'function')) return reject(503, 'Conversion unavailable');
+        conversionRunning = true;
+        convert(req, res, identity).catch(() => { if (!res.headersSent && !res.destroyed) reject(503, 'Conversion unavailable'); }).finally(release);
+        return;
+      }
     }
     if (req.method !== 'GET' && req.method !== 'HEAD') return reject(405, 'Method not allowed');
     const route = ['/', '/impressum', '/datenschutz'].includes(pathname) ? '/index.html' : pathname;
@@ -132,12 +197,27 @@ function validSeed(row, priceId) {
     row.quota_period === 'day' && row.valid_days === 30 && row.limits?.max_file_bytes === 10485760;
 }
 
-async function createConfiguredServer(env, { paygateFactory = createPaygate, stripeFactory = key => new (require('stripe'))(key) } = {}) {
+async function createConfiguredServer(env, { paygateFactory = createPaygate, stripeFactory = key => new (require('stripe'))(key), activeProducts } = {}) {
   validatedConfig(env); // reject before touching network or creating clients
   const paygate = paygateFactory({ databaseUrl: env.PAYGATE_DATABASE_URL, ipSecret: env.PAYGATE_IP_SECRET });
   try {
     const row = await paygate.verifyStartup();
     if (!validSeed(row, env.STRIPE_PRICE_ID)) throw new Error('paygate role/product configuration mismatch');
+    // consume_paid has no size argument: every active product must share this limit.
+    if (activeProducts || paygateFactory === createPaygate) {
+      const list = activeProducts || (async databaseUrl => {
+        const db = new (require('pg').Client)({ connectionString: databaseUrl });
+        try {
+          await db.connect();
+          const { rows } = await db.query({ text: 'select quota_period, limits from paygate.products where app_id = $1 and active = true', values: ['pdf2md'] });
+          return rows;
+        } finally { await db.end(); }
+      });
+      const products = await list(env.PAYGATE_DATABASE_URL);
+      if (!Array.isArray(products) || products.length === 0 || products.some(product => product.quota_period !== 'day' || product.limits?.max_file_bytes !== LIMIT)) {
+        throw new Error('paygate active product quota/limit mismatch');
+      }
+    }
     const stripe = stripeFactory(env.STRIPE_SECRET_KEY);
     return createServer({ token: env.API_TOKEN, apiUrl: env.API_URL || 'http://127.0.0.1:8000', buildDir: path.join(__dirname, 'build'),
       paygate, stripe, publicBaseUrl: env.PUBLIC_BASE_URL, ipSecret: env.PAYGATE_IP_SECRET,
