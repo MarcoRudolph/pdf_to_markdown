@@ -24,7 +24,7 @@ function fakePaygate(overrides = {}) {
 }
 function listen(server) { return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port))); }
 function close(server) { return new Promise(resolve => server.close(resolve)); }
-async function harness(t, { paygate = fakePaygate(), upstreamHandler } = {}) {
+async function harness(t, { paygate = fakePaygate(), upstreamHandler, uploadBodyTimeoutMs } = {}) {
   const seen = [];
   const upstream = http.createServer((req, res) => { const chunks = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => {
     seen.push({ headers: req.headers, body: Buffer.concat(chunks) });
@@ -33,7 +33,7 @@ async function harness(t, { paygate = fakePaygate(), upstreamHandler } = {}) {
   const upPort = await listen(upstream);
   const server = createServer({ token: 'private-only', apiUrl: `http://127.0.0.1:${upPort}`, buildDir: __dirname,
     testMode: true, paygate, publicBaseUrl: 'https://pdf.example.test', testCraOrigin: 'http://localhost:3000',
-    cookieSecret: 'test-cookie-secret-which-is-never-live', trustedProxyIp: '192.0.2.8' });
+    cookieSecret: 'test-cookie-secret-which-is-never-live', trustedProxyIp: '192.0.2.8', uploadBodyTimeoutMs });
   const port = await listen(server);
   t.after(async () => { await close(server); await close(upstream); });
   return { port, paygate, seen };
@@ -134,6 +134,44 @@ test('eight uploads hold admission slots before parsing; ninth 429, then release
       const poll = () => { if (seen.length === 1) { clearTimeout(timeout); resolve(); } else setTimeout(poll, 10); }; poll(); });
     assert.equal((await request(port, multipart(pdf(100)))).status, 200);
   } finally { for (const req of sockets) req.destroy(); }
+});
+
+test('eight trickling incomplete multipart uploads expire by total deadline and release admission without quota debit', async t => {
+  const { port, paygate, seen } = await harness(t, { uploadBodyTimeoutMs: 250 });
+  const pending = [];
+  const sockets = [];
+  try {
+    for (let n = 0; n < 8; n++) {
+      const req = http.request({ hostname: '127.0.0.1', port, path: '/v1/convert', method: 'POST', headers: {
+        origin: 'http://localhost:3000', 'content-type': 'multipart/form-data; boundary=incoming', 'transfer-encoding': 'chunked',
+      } });
+      sockets.push(req);
+      pending.push(new Promise((resolve, reject) => {
+        req.on('response', res => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+        req.on('error', reject);
+      }));
+      req.write('--incoming\r\nContent-Disposition: form-data; name="file"; filename="wait.pdf"\r\n\r\n%PDF-1.7\n');
+    }
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal((await request(port, multipart(pdf(100)))).status, 429);
+    // Receiving another chunk must not reset the total body deadline.
+    for (const req of sockets) req.write('x');
+    assert.deepEqual(await Promise.race([
+      Promise.all(pending), new Promise((_, reject) => setTimeout(() => reject(Error('body deadline did not release slots')), 2000)),
+    ]), Array(8).fill(408));
+    assert.equal(paygate.calls.length, 0);
+    assert.equal(seen.length, 0);
+    assert.equal((await request(port, multipart(pdf(100)))).status, 200);
+  } finally { for (const req of sockets) req.destroy(); }
+});
+
+test('completed upload clears body deadline while upstream is still working', async t => {
+  const { port, paygate } = await harness(t, { uploadBodyTimeoutMs: 100,
+    upstreamHandler(req, res) { setTimeout(() => res.end('# delayed'), 250); } });
+  const result = await request(port, multipart(pdf(100)));
+  assert.equal(result.status, 200);
+  assert.equal(result.body, '# delayed');
+  assert.deepEqual(paygate.calls.map(call => call[0]), ['free']);
 });
 
 test('upstream 200 followed by truncated downstream never refunds; unknown outcome logs reconciliation', async t => {

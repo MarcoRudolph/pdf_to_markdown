@@ -8,16 +8,17 @@ const { createPaygate } = require('./paygate.cjs');
 const { createPayments } = require('./payments.cjs');
 const { identityFor } = require('./identity.cjs');
 const { randomBytes } = require('node:crypto');
-const { parsePdf, LIMIT } = require('./upload.cjs');
+const { parsePdf, LIMIT, UPLOAD_BODY_TIMEOUT_MS } = require('./upload.cjs');
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.ico': 'image/x-icon', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8' };
 
-function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId, stripeWebhookSecret, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false, testHandlers, testCraOrigin }) {
+function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId, stripeWebhookSecret, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false, testHandlers, testCraOrigin, uploadBodyTimeoutMs = UPLOAD_BODY_TIMEOUT_MS }) {
   if (!token) throw new Error('API_TOKEN must be set on the server');
   try { http.validateHeaderValue('authorization', `Bearer ${token}`); }
   catch { throw new Error('Invalid API_TOKEN'); }
   if (!paygate && !testMode) throw new Error('paygate required outside explicit test mode');
-  if (!testMode && (testHandlers || testCraOrigin)) throw new Error('Test-only route/origin override refused');
+  if (!testMode && (testHandlers || testCraOrigin || uploadBodyTimeoutMs !== UPLOAD_BODY_TIMEOUT_MS)) throw new Error('Test-only route/origin/upload timeout override refused');
+  if (!Number.isSafeInteger(uploadBodyTimeoutMs) || uploadBodyTimeoutMs <= 0) throw new Error('Invalid upload body timeout');
   if (!publicBaseUrl || !cookieSecret || !isIP(trustedProxyIp)) throw new Error('PUBLIC_BASE_URL, PAYGATE_COOKIE_SECRET and TRUSTED_PROXY_IP required');
   const allowedOrigin = new URL(publicBaseUrl).origin;
   if (testCraOrigin && new URL(testCraOrigin).origin !== testCraOrigin) throw new Error('Invalid test CRA Origin');
@@ -63,8 +64,8 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId,
     };
     if (!/^multipart\/form-data(?:;|$)/i.test(req.headers['content-type'] || '')) return reject(400, 'Expected PDF upload');
     let file;
-    try { file = await parsePdf(req); }
-    catch (error) { return reject(error.status === 413 ? 413 : 400, error.status === 413 ? 'PDF exceeds size limit' : 'Expected PDF upload'); }
+    try { file = await parsePdf(req, uploadBodyTimeoutMs); }
+    catch (error) { return reject(error.status === 408 ? 408 : (error.status === 413 ? 413 : 400), error.status === 408 ? 'Upload timeout' : (error.status === 413 ? 'PDF exceeds size limit' : 'Expected PDF upload')); }
     if (res.destroyed) return;
     if (file.length > LIMIT) return reject(413, 'PDF exceeds size limit');
     let reservation, kind;

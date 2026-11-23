@@ -2,8 +2,9 @@
 const Busboy = require('busboy');
 const LIMIT = 10485760;
 const MAX_REQUEST = LIMIT + 65536;
+const UPLOAD_BODY_TIMEOUT_MS = 60000; // Total body time, not an idle timeout; allows 10 MiB at ~170 KiB/s.
 
-function parsePdf(req) {
+function parsePdf(req, timeoutMs = UPLOAD_BODY_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     let parser;
     try { parser = Busboy({ headers: req.headers, limits: { files: 1, fileSize: LIMIT, fields: 0, parts: 1 } }); }
@@ -20,16 +21,26 @@ function parsePdf(req) {
     let bytes = 0, fileCount = 0, fileBytes = 0;
     let invalid = false, tooLarge = false, completed = false, requestEnded = false, parserClosed = false;
     let fileBuffer;
+    const deadline = setTimeout(() => fail(408), timeoutMs);
+    const cleanup = () => {
+      clearTimeout(deadline);
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('aborted', onAbort);
+    };
     const fail = status => {
       if (completed) return;
       completed = true;
+      cleanup();
       req.unpipe(parser);
+      parser.destroy();
       req.resume();
       reject({ status });
     };
     const finish = () => {
       if (completed || !requestEnded || !parserClosed) return;
       completed = true;
+      cleanup();
       const actualFileBytes = closingStart === null || fileStart === null ? null : closingStart - fileStart;
       if (tooLarge || actualFileBytes > LIMIT) reject({ status: 413 });
       else if (invalid || fileCount !== 1 || closes !== 1 || actualFileBytes === null ||
@@ -65,11 +76,12 @@ function parsePdf(req) {
         position++;
       }
     }
-    req.on('data', chunk => {
+    function onData(chunk) {
       bytes += chunk.length;
       if (bytes > MAX_REQUEST) { fail(413); return; }
       scan(chunk);
-    });
+    }
+    req.on('data', onData);
     parser.on('file', (name, stream) => {
       fileCount++;
       if (name !== 'file' || fileCount > 1) invalid = true;
@@ -91,9 +103,11 @@ function parsePdf(req) {
     parser.on('partsLimit', () => { /* fired for the first part; raw scanner rejects extras */ });
     parser.on('error', () => fail(400));
     parser.on('close', () => { parserClosed = true; finish(); });
-    req.on('end', () => { requestEnded = true; finish(); });
-    req.on('aborted', () => fail(400));
+    function onEnd() { requestEnded = true; finish(); }
+    function onAbort() { fail(400); }
+    req.on('end', onEnd);
+    req.on('aborted', onAbort);
     req.pipe(parser);
   });
 }
-module.exports = { parsePdf, LIMIT, MAX_REQUEST };
+module.exports = { parsePdf, LIMIT, MAX_REQUEST, UPLOAD_BODY_TIMEOUT_MS };
