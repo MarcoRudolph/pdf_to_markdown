@@ -1,0 +1,103 @@
+{
+  "verdict": "needs_revision",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "major",
+      "location": "Task 3 lines 83,85",
+      "issue": "package-lock.json:10818 pins jsdom 16.7.0, which has no HTMLDialogElement.showModal or Escape-to-cancel, so the modal tests will throw.",
+      "recommended_change": "Stub showModal/close in src/setupTests.js, fire a 'cancel' event to test Escape, and guard showModal in production code."
+    },
+    {
+      "id": "F2",
+      "severity": "major",
+      "location": "Line 41 vs Task 4 lines 95-99",
+      "issue": "Task 4 enables Donate in App.js:125 and commits to main with no feature flag, which breaks the line-41 gate if Pages deploys from main.",
+      "recommended_change": "Work on a feature branch or use a REACT_APP_DONATIONS flag, and set the Pages bindings before merging."
+    },
+    {
+      "id": "F3",
+      "severity": "major",
+      "location": "File map 26-27, Task 2 71-73",
+      "issue": "package.json has no \"type\" or engines field, so ESM .js route files imported by node:test may parse as CJS.",
+      "recommended_change": "Pin engines.node or move the handlers into .mjs files that the route files re-export, and add a RED check for SyntaxError."
+    },
+    {
+      "id": "F4",
+      "severity": "major",
+      "location": "Lines 17,35,45-46,112",
+      "issue": "A public €1 Checkout endpoint invites card testing; the Origin check is spoofable by any script (see the line-103 curl), and the WAF limit has no task or test.",
+      "recommended_change": "Make a Cloudflare rate limit and Stripe Radar rules release gates, consider a €3-5 minimum and/or Turnstile, and describe Origin as CSRF-only."
+    },
+    {
+      "id": "F5",
+      "severity": "major",
+      "location": "Lines 19,38-39,71,103-104",
+      "issue": "An exact single DONATION_ORIGIN returns 403 on Pages previews and on npm start (package.json:5 proxy, localhost:3000).",
+      "recommended_change": "Use separate Preview and Production DONATION_ORIGIN values or a config allowlist, normalise slashes, require https except loopback, and document the dev origin."
+    },
+    {
+      "id": "F6",
+      "severity": "minor",
+      "location": "Line 36, Task 1 line 59",
+      "issue": "locale is validated and sent by the client, but the Stripe field list leaves it out, so Checkout's language can differ from the modal's.",
+      "recommended_change": "Send locale=de|en to Stripe and assert it in the fake-fetch test; optionally add submit_type=donate."
+    },
+    {
+      "id": "F7",
+      "severity": "major",
+      "location": "Task 1 lines 57,61; Task 4 line 93",
+      "issue": "paid|pending|not_found treats expired and delayed-method (complete+unpaid) sessions as pending, even though line 36 enables dynamic methods.",
+      "recommended_change": "Map status+payment_status to paid|processing|expired|not_found and test each mapping."
+    },
+    {
+      "id": "F8",
+      "severity": "minor",
+      "location": "Task 2 lines 69-71",
+      "issue": "Exporting only onRequestPost/onRequestGet means the 405 for OPTIONS or other methods can't be tested and isn't guaranteed.",
+      "recommended_change": "Export onRequest, switch on method, return 405 with Allow/no-store headers, and test it directly."
+    },
+    {
+      "id": "F9",
+      "severity": "minor",
+      "location": "Line 39",
+      "issue": "A stateless server can't 'reject requests while the browser is waiting'; line 48 assigns that guard to the client.",
+      "recommended_change": "Reword as a client ref lock (like busy at App.js:51), optionally with an Idempotency-Key."
+    },
+    {
+      "id": "F10",
+      "severity": "minor",
+      "location": "Task 4 line 97",
+      "issue": "session_id stays in the URL after return, and Pages has no _headers Referrer-Policy (only server.cjs:17 sets one).",
+      "recommended_change": "Call history.replaceState to '/' after the status check settles, test it, and add public/_headers with no-referrer."
+    },
+    {
+      "id": "F11",
+      "severity": "minor",
+      "location": "Task 4 lines 93,97",
+      "issue": "The plan updates only App.js:25; App.js:22,27,31 don't name Stripe, Cloudflare Functions, the legal basis, or third-country transfers.",
+      "recommended_change": "Add a Stripe payments section and a Cloudflare note to /datenschutz, and assert in a test that it names Stripe."
+    },
+    {
+      "id": "F12",
+      "severity": "minor",
+      "location": "Task 4 line 95",
+      "issue": "App.js:125's aria-label and small text 'Demnächst verfügbar', plus pdf_to_markdown/README.md:48 and README.md:13-14, still say Donate is disabled.",
+      "recommended_change": "List these edits explicitly and assert the button name is exactly 'Donate'."
+    },
+    {
+      "id": "F13",
+      "severity": "minor",
+      "location": "Line 16",
+      "issue": "The static-Pages statement is in root README.md:16-18, not pdf_to_markdown/README.md.",
+      "recommended_change": "Correct the citation and confirm the real Pages deploy mode before documenting it."
+    },
+    {
+      "id": "F14",
+      "severity": "minor",
+      "location": "Line 18, Task 3 line 83",
+      "issue": "The rule doesn't say which navigator.languages entry wins (e.g. ['en-US','de-DE']), and the tests cover single values only.",
+      "recommended_change": "Specify the precedence rule and add a test with a multi-entry array."
+    }
+  ]
+}

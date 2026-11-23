@@ -12,7 +12,7 @@ const { parsePdf, LIMIT } = require('./upload.cjs');
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.ico': 'image/x-icon', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8' };
 
-function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false, testHandlers, testCraOrigin }) {
+function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId, stripeWebhookSecret, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false, testHandlers, testCraOrigin }) {
   if (!token) throw new Error('API_TOKEN must be set on the server');
   try { http.validateHeaderValue('authorization', `Bearer ${token}`); }
   catch { throw new Error('Invalid API_TOKEN'); }
@@ -25,7 +25,7 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId,
   if (!['http:', 'https:'].includes(upstream.protocol) || upstream.username || upstream.password || upstream.pathname !== '/') throw new Error('Invalid API_URL');
   const client = upstream.protocol === 'https:' ? require('node:https') : http;
   const payments = stripe && paygate && stripePriceId && codeSecret
-    ? createPayments({ stripe, paygate, stripePriceId, publicBaseUrl, codeSecret }) : null;
+    ? createPayments({ stripe, paygate, stripePriceId, publicBaseUrl, codeSecret, webhookSecret: stripeWebhookSecret }) : null;
   // Single-process limiter; a shared store is mandatory before multiple workers.
   const paymentHits = new Map();
   function admitted(kind, identity) {
@@ -153,6 +153,24 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId,
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'");
     function reject(status, message) { if (!res.headersSent) { res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }); res.end(message); } }
     const pathname = new URL(req.url, 'http://localhost').pathname;
+    if (pathname === '/v1/stripe/webhook') {
+      if (req.method !== 'POST') return reject(405, 'Method not allowed');
+      const signatures = req.headersDistinct?.['stripe-signature'];
+      if (!payments || !stripeWebhookSecret) return reject(503, 'Webhook unavailable');
+      if (!signatures || signatures.length !== 1 || !signatures[0]) return reject(400, 'Invalid signature');
+      (async () => {
+        let size = 0;
+        const chunks = [];
+        for await (const chunk of req) {
+          size += chunk.length;
+          if (size > 262144) return reject(413, 'Payload too large');
+          chunks.push(chunk);
+        }
+        const outcome = await payments.webhook(Buffer.concat(chunks), signatures[0]);
+        if (!res.destroyed) reject(outcome.status, outcome.status === 200 ? 'OK' : 'Invalid signature');
+      })().catch(() => { if (!res.destroyed) reject(503, 'Webhook unavailable'); });
+      return;
+    }
     let release = () => {};
     let conversionRunning = false;
     if (pathname === '/v1/convert' && req.method === 'POST') {
@@ -302,7 +320,7 @@ async function createConfiguredServer(env, { paygateFactory = createPaygate, str
     const stripe = stripeFactory(env.STRIPE_SECRET_KEY);
     return createServer({ token: env.API_TOKEN, apiUrl: env.API_URL || 'http://127.0.0.1:8000', buildDir: path.join(__dirname, 'build'),
       paygate, stripe, stripePriceId: env.STRIPE_PRICE_ID, publicBaseUrl: env.PUBLIC_BASE_URL, ipSecret: env.PAYGATE_IP_SECRET,
-      codeSecret: env.PAYGATE_CODE_SECRET, cookieSecret: env.PAYGATE_COOKIE_SECRET, trustedProxyIp: env.TRUSTED_PROXY_IP });
+      codeSecret: env.PAYGATE_CODE_SECRET, stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET, cookieSecret: env.PAYGATE_COOKIE_SECRET, trustedProxyIp: env.TRUSTED_PROXY_IP });
   } catch (error) {
     await paygate.close();
     throw error;
