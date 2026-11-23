@@ -22,8 +22,25 @@ beforeEach(() => {
 });
 afterEach(() => { jest.useRealTimers(); });
 
+test('displays server-provided free and paid file limits, not hardcoded plan limits', async () => {
+  global.fetch.mockResolvedValue(response({
+    free: { units_left: 2, limits: { max_file_bytes: 2 * 1048576 } },
+    paid: [{ units_left: 7, limits: { max_file_bytes: 8 * 1048576 } }],
+  }));
+  render(<App />);
+  expect(await screen.findByText(/2 MiB frei.*8 MiB mit Pass/i)).toBeInTheDocument();
+  expect(screen.queryByText(/1 MiB frei.*10 MiB mit Pass/i)).not.toBeInTheDocument();
+});
+
+test('without an active pass the quota does not present the offer size as a current paid limit', async () => {
+  render(<App />);
+  expect(await screen.findByText(/5 PDFs frei/i)).toBeInTheDocument();
+  expect(screen.getByText(/1 MiB frei.*kein aktiver Pass/i)).toBeInTheDocument();
+  expect(screen.queryByText(/10 MiB mit Pass/i)).not.toBeInTheDocument();
+});
+
 test('shows server free balance and sum of active paid passes with distinct file limits and fixed offer', async () => {
-  global.fetch.mockResolvedValue(response(quota(2, [{ units_left: 17 }, { units_left: 31 }])));
+  global.fetch.mockResolvedValue(response(quota(2, [{ units_left: 17, limits: { max_file_bytes: 10485760 } }, { units_left: 31, limits: { max_file_bytes: 10485760 } }])));
   render(<App />);
   expect(await screen.findByText(/2 PDFs frei/i)).toBeInTheDocument();
   expect(screen.getByText(/48 PDFs mit Pass/i)).toBeInTheDocument();
@@ -44,6 +61,92 @@ test('402 offers checkout rather than generic retry and navigates only to server
   fireEvent.click(screen.getAllByRole('button', { name: /Pass kaufen/i })[1]);
   await waitFor(() => expect(navigate).toHaveBeenCalledWith('https://checkout.stripe.com/c/pay'));
   expect(global.fetch).toHaveBeenCalledWith('/v1/checkout', expect.objectContaining({ method: 'POST', body: '{}' }));
+});
+
+test.each([
+  'javascript:alert(1)',
+  'https://checkout.stripe.com.evil.example/c/pay',
+  '/relative-checkout',
+  'https://attacker.example/checkout',
+  'https://user:secret@checkout.stripe.com/c/pay',
+  'https://checkout.stripe.com:444/c/pay',
+  null,
+])('checkout refuses unsafe or malformed destination %p', async destination => {
+  global.fetch.mockImplementation(async url => url === '/v1/checkout' ? response({ url: destination }) : response(quota()));
+  const navigate = jest.fn();
+  render(<App navigate={navigate} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Pass kaufen' }));
+  expect(await screen.findByText(/Checkout derzeit nicht verfügbar/i)).toBeInTheDocument();
+  expect(navigate).not.toHaveBeenCalled();
+});
+
+test('privacy draft does not claim the restore code is shown only once', () => {
+  window.history.replaceState({}, '', '/datenschutz');
+  render(<App />);
+  expect(screen.getByText(/bei bestätigter Zahlung.*erneut abrufbar/i)).toBeInTheDocument();
+  expect(screen.queryByText(/im Browser einmal angezeigt/i)).not.toBeInTheDocument();
+});
+
+test('a never-settling status fetch times out, aborts, scrubs URL and enables retry', async () => {
+  jest.useFakeTimers();
+  window.history.replaceState({}, '', '/?session_id=cs_stalled&keep=1');
+  let statusSignal;
+  global.fetch.mockImplementation((url, options) => {
+    if (url.startsWith('/v1/checkout-status')) {
+      statusSignal = options.signal;
+      return new Promise(() => {}); // Deliberately ignores AbortSignal.
+    }
+    return Promise.resolve(response(quota()));
+  });
+  const timerSpy = jest.spyOn(global, 'setTimeout');
+  const clearSpy = jest.spyOn(global, 'clearTimeout');
+  render(<App />);
+  expect(screen.getByText(/Zahlung wird geprüft/i)).toBeInTheDocument();
+  expect(statusSignal).toBeDefined();
+  await act(async () => { jest.advanceTimersByTime(5000); await Promise.resolve(); });
+  expect(statusSignal.aborted).toBe(true);
+  expect(clearSpy).toHaveBeenCalledWith(timerSpy.mock.results[0].value);
+  clearSpy.mockRestore();
+  timerSpy.mockRestore();
+  expect(screen.getByText(/Zahlungsstatus.*nicht verfügbar/i)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Zahlungsstatus erneut prüfen/i })).toBeInTheDocument();
+  expect(screen.queryByText(/Wiederherstellungscode:/i)).not.toBeInTheDocument();
+  expect(window.location.search).toBe('?keep=1');
+});
+
+test('abort-aware fetch still reports a retryable status timeout, not a raw AbortError', async () => {
+  jest.useFakeTimers();
+  window.history.replaceState({}, '', '/?session_id=cs_abortaware');
+  global.fetch.mockImplementation((url, options) => url.startsWith('/v1/checkout-status')
+    ? new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }))
+    : Promise.resolve(response(quota())));
+  render(<App />);
+  await act(async () => { jest.advanceTimersByTime(5000); await Promise.resolve(); });
+  expect(screen.getByText(/Zahlungsstatus derzeit nicht verfügbar/i)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Zahlungsstatus erneut prüfen/i })).toBeInTheDocument();
+  expect(window.location.search).toBe('');
+});
+
+test('unmount aborts an in-flight status fetch and clears its timeout', async () => {
+  jest.useFakeTimers();
+  window.history.replaceState({}, '', '/?session_id=cs_unmount');
+  let statusSignal;
+  global.fetch.mockImplementation((url, options) => {
+    if (url.startsWith('/v1/checkout-status')) {
+      statusSignal = options.signal;
+      return new Promise(() => {});
+    }
+    return Promise.resolve(response(quota()));
+  });
+  const timerSpy = jest.spyOn(global, 'setTimeout');
+  const clearSpy = jest.spyOn(global, 'clearTimeout');
+  const view = render(<App />);
+  expect(statusSignal).toBeDefined();
+  await act(async () => { view.unmount(); await Promise.resolve(); });
+  expect(statusSignal.aborted).toBe(true);
+  expect(clearSpy).toHaveBeenCalledWith(timerSpy.mock.results[0].value);
+  clearSpy.mockRestore();
+  timerSpy.mockRestore();
 });
 
 test('pending checkout never exposes restore code; bounded polling scrubs URL on exhaustion', async () => {

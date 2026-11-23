@@ -3,6 +3,9 @@ import './App.css';
 
 const LIMIT = 10 * 1024 * 1024;
 const SOURCE = 'https://github.com/MarcoRudolph/pdf_to_markdown';
+const formatFileLimit = bytes => Number.isFinite(bytes) && bytes > 0
+  ? `${new Intl.NumberFormat('de-DE', { maximumFractionDigits: 2 }).format(bytes / 1048576)} MiB`
+  : 'Limit nicht verfügbar';
 
 function StatusIcon({ kind }) {
   if (kind === 'success') return <svg viewBox="0 0 80 80" fill="none" aria-hidden="true"><circle cx="40" cy="40" r="30" stroke="currentColor" strokeWidth="3"/><path d="m23 40 12 12 23-25" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/></svg>;
@@ -24,7 +27,7 @@ function Legal({ privacy }) {
       <p>Beim Upload wird die PDF über unseren gleichursprünglichen Server-Proxy an die Konvertierungs-API übertragen. Die API prüft Dateiformat, Größe und Seitenzahl und extrahiert die vorhandene Textebene (keine OCR). Die PDF liegt während der Verarbeitung in einem privaten temporären Verzeichnis und wird nach Erfolg oder Fehler entfernt. Die Markdown-Antwort wird an den Browser zurückgegeben und dort bis zum Wechsel der Datei beziehungsweise Verlassen der Seite für den Download vorgehalten. Der Proxy speichert keine Kopie der PDF oder der Markdown-Antwort dauerhaft.</p>
       <p>Vermeiden Sie nach Möglichkeit vertrauliche Daten in hochgeladenen PDFs. Die App verwendet keine Analyse-Skripte oder Nutzerkonten. Für Kontingente setzt der Proxy jedoch einen technisch erforderlichen signierten Cookie <code>pdf2md_id</code> (HttpOnly, Secure, SameSite=Lax, Gültigkeit bis zu einem Jahr). Aus dessen zufälligem Wert wird ein pseudonymer Nutzer-Hash gebildet. Für die kostenlose Tagesgrenze wird außerdem die Client-IP mit einem geheimen Schlüssel und dem jeweiligen Kalendertag (Europe/Berlin) per HMAC-SHA256 gehasht; der Tageswert dient der Kontingentprüfung, nicht einer öffentlichen Identifikation. Die IP kann in Infrastruktur-/Uvicorn-Logs unabhängig davon erscheinen.</p>
       <h2>Kontingent, Zahlung und Wiederherstellung</h2>
-      <p>Die App speichert in der Paygate-Datenbank pseudonyme Kontingent- und Nutzungsdaten sowie bei Käufen die von Stripe übermittelte E-Mail-Adresse, Stripe-Kauf-/Zahlungsreferenzen, Pass-Laufzeit, Nutzungswerte und einen Hash des kaufbezogenen Wiederherstellungscodes. Der Code wird nach bestätigter Zahlung im Browser einmal angezeigt; bewahren Sie ihn selbst sicher auf. Eine Checkout-Rückleitung allein bestätigt keine Zahlung. Bei Wiederherstellung wird der eingegebene Code serverseitig gehasht und der Pass mit dem aktuellen Cookie verknüpft. Stripe verarbeitet für den Checkout E-Mail-Adresse und Zahlungsdaten nach seinen eigenen Bedingungen; diese App speichert keine vollständigen Kartendaten. Der Checkout übermittelt eine pseudonyme Referenz an Stripe.</p>
+      <p>Die App speichert in der Paygate-Datenbank pseudonyme Kontingent- und Nutzungsdaten sowie bei Käufen die von Stripe übermittelte E-Mail-Adresse, Stripe-Kauf-/Zahlungsreferenzen, Pass-Laufzeit, Nutzungswerte und einen Hash des kaufbezogenen Wiederherstellungscodes. Der Code ist bei bestätigter Zahlung mit derselben Zahlungsreferenz und dem ursprünglichen Cookie im Browser erneut abrufbar; bewahren Sie ihn trotzdem selbst sicher auf. Eine Checkout-Rückleitung allein bestätigt keine Zahlung. Bei Wiederherstellung wird der eingegebene Code serverseitig gehasht und der Pass mit dem aktuellen Cookie verknüpft. Stripe verarbeitet für den Checkout E-Mail-Adresse und Zahlungsdaten nach seinen eigenen Bedingungen; diese App speichert keine vollständigen Kartendaten. Der Checkout übermittelt eine pseudonyme Referenz an Stripe.</p>
       <p>Der Cookie hat eine maximale Lebensdauer von einem Jahr; ein Pass gilt 30 Tage ab Kauf. Diese Fristen sind <strong>keine</strong> automatische Löschfrist für Datenbankeinträge. Für Kauf-/Abrechnungsdaten, Code-Hashes, Nutzungswerte, technische Logs und Backups sind tatsächliche Aufbewahrungs- und Löschfristen noch festzulegen und rechtlich zu prüfen. Der Proxy schreibt keine eigenen Access-Logs, aber Uvicorn protokolliert standardmäßig Client-IP, Pfad und Status; vorgeschaltete Hosting-/TLS-Komponenten können weitere Logs führen. Die Status-URL wird nach Prüfung aus der Browseradresszeile entfernt; zuvor sichtbare Referenzen können in Browserhistorie oder Infrastruktur-Logs angefallen sein.</p>
       <h2>Rechtsgrundlagen und Empfänger</h2>
       <p>Die Verarbeitung erfolgt zur Bereitstellung des Konvertierungsdienstes, zur Verwaltung bezahlter Pässe und zur technischen Sicherheit. Empfänger sind der Zahlungsdienstleister Stripe (Checkout, Zahlungsabwicklung), der Betreiber der Paygate-PostgreSQL-Datenbank und die Hosting-/TLS-/Reverse-Proxy-Anbieter; konkrete Anbieter, Standorte, Drittlandübermittlungen und Verträge sind vor Betrieb einzutragen. Die einschlägigen Rechtsgrundlagen (z. B. Art. 6 Abs. 1 lit. b, c oder f DSGVO) einschließlich Cookie-Einordnung sind von einer Rechtsberatung für den tatsächlichen Betrieb zu prüfen; dieser Entwurf behauptet keine abschließende rechtliche Bewertung.</p>
@@ -78,6 +81,7 @@ function App({ navigate = url => window.location.assign(url) }) {
   useEffect(() => {
     if (window.location.pathname === '/datenschutz' || window.location.pathname === '/impressum') return;
     let active = true;
+    const lifecycle = new AbortController();
     refreshQuota();
     const location = new URL(window.location.href);
     const refs = location.searchParams.getAll('session_id');
@@ -91,13 +95,47 @@ function App({ navigate = url => window.location.assign(url) }) {
       scrub();
       return () => { active = false; };
     }
+    async function fetchStatus() {
+      const controller = new AbortController();
+      let timer;
+      let cancel;
+      const deadline = new Promise((_, reject) => {
+        cancel = () => {
+          controller.abort();
+          reject(new Error('Zahlungsstatus derzeit nicht verfügbar. Bitte erneut prüfen.'));
+        };
+        lifecycle.signal.addEventListener('abort', cancel, { once: true });
+        timer = setTimeout(cancel, 4000);
+      });
+      try {
+        return await Promise.race([
+          fetch('/v1/checkout-status?session_id=' + encodeURIComponent(refs[0]), { credentials: 'same-origin', signal: controller.signal }),
+          deadline,
+        ]);
+      } finally {
+        clearTimeout(timer);
+        lifecycle.signal.removeEventListener('abort', cancel);
+      }
+    }
+    async function pauseBeforeRetry() {
+      await new Promise(resolve => {
+        let timer;
+        const done = () => {
+          clearTimeout(timer);
+          lifecycle.signal.removeEventListener('abort', done);
+          resolve();
+        };
+        lifecycle.signal.addEventListener('abort', done, { once: true });
+        timer = setTimeout(done, 600);
+      });
+    }
     async function checkStatus() {
       setCanRetryStatus(false);
       setPaymentMessage('Zahlung wird geprüft …');
       let ready = false;
       try {
         for (let attempt = 0; attempt < 4 && active; attempt++) {
-          const response = await fetch('/v1/checkout-status?session_id=' + encodeURIComponent(refs[0]), { credentials: 'same-origin' });
+          const response = await fetchStatus();
           if (!response.ok) throw new Error('Zahlungsstatus derzeit nicht verfügbar. Bitte später erneut prüfen oder Support kontaktieren.');
           const result = await response.json();
           if (!active) return;
@@ -109,18 +147,18 @@ function App({ navigate = url => window.location.assign(url) }) {
             return;
           }
           if (result.status !== 'pending') throw new Error('Zahlungsstatus derzeit nicht verfügbar. Bitte später erneut prüfen.');
-          if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 600));
+          if (attempt < 3) await pauseBeforeRetry();
         }
         if (active) setPaymentMessage('Zahlung noch nicht bestätigt. Bitte später erneut prüfen oder Support kontaktieren.');
       } catch (err) {
-        if (active) setPaymentMessage(err.message);
+        if (active) setPaymentMessage(err?.name === 'AbortError' ? 'Zahlungsstatus derzeit nicht verfügbar. Bitte erneut prüfen.' : err.message);
       } finally {
         if (active) { setCanRetryStatus(!ready); scrub(); }
       }
     }
     checkStatusRef.current = checkStatus;
     checkStatus();
-    return () => { active = false; checkStatusRef.current = null; };
+    return () => { active = false; checkStatusRef.current = null; lifecycle.abort(); };
   // Runs once per page visit; session_id is not payment proof.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -134,9 +172,9 @@ function App({ navigate = url => window.location.assign(url) }) {
       if (!response.ok) throw new Error('Checkout derzeit nicht verfügbar. Bitte später erneut versuchen.');
       const result = await response.json();
       const destination = new URL(result.url);
-      if (destination.protocol !== 'https:' || destination.hostname !== 'checkout.stripe.com') throw new Error('Checkout derzeit nicht verfügbar.');
+      if (destination.protocol !== 'https:' || destination.hostname !== 'checkout.stripe.com' || destination.username || destination.password || destination.port) throw new Error('Checkout derzeit nicht verfügbar.');
       navigate(destination.href);
-    } catch (err) { setPaymentMessage(err.message); setPaymentBusy(false); }
+    } catch { setPaymentMessage('Checkout derzeit nicht verfügbar. Bitte später erneut versuchen.'); setPaymentBusy(false); }
   }
 
   async function redeem(event) {
@@ -235,7 +273,7 @@ function App({ navigate = url => window.location.assign(url) }) {
       <p className="intro">Wandeln Sie textbasierte PDFs in gut lesbares Markdown um. Ohne Konto und ohne OCR – die PDF benötigt eine vorhandene Textebene.</p>
       <section className="quota-panel" aria-label="Ihr Kontingent">
         <div><strong>Ihr Kontingent heute</strong><p>{quotaError ? 'Kontingent derzeit nicht verfügbar. Bitte später erneut versuchen.' : quota ? <><span>{quota.free.units_left} PDFs frei</span><span>{quota.paid.reduce((total, pass) => total + (Number(pass.units_left) || 0), 0)} PDFs mit Pass</span></> : 'Kontingent wird geladen …'}</p></div>
-        <p className="quota-limits">1 MiB frei · 10 MiB mit Pass</p>
+        <p className="quota-limits">{quotaError ? 'Größenlimit derzeit nicht verfügbar' : quota ? <>{formatFileLimit(quota.free.limits?.max_file_bytes)} frei · {quota.paid.length ? `${[...new Set(quota.paid.map(pass => formatFileLimit(pass.limits?.max_file_bytes)))].join(' / ')} mit Pass` : 'kein aktiver Pass (Angebot: bis 10 MiB)'}</> : 'Größenlimit wird geladen …'}</p>
       </section>
       {paymentMessage && <div className="payment-message" role="status"><span>{paymentMessage}</span>{canRetryStatus && <button type="button" onClick={() => checkStatusRef.current?.()}>Zahlungsstatus erneut prüfen</button>}</div>}
       {restoreCode && <div className="restore-result"><strong>Wiederherstellungscode:</strong> <code>{restoreCode}</code><p>Bitte den Wiederherstellungscode sicher aufbewahren – er wird nur hier angezeigt.</p></div>}
