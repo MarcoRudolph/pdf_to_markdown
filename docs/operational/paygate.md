@@ -1,27 +1,20 @@
-# Task 6: Payment Gateway Operations
+# PDF-to-Markdown Paygate: operator notes (not a deployment runbook)
 
-## Overview
-Operational docs for the payment gateway in `pdf_to_markdown`.
+The app is NOT deployed or DB-tested by these notes. Do not enable paid UI or route production traffic until the separate DB handoff, SQL smoke/concurrency tests, Stripe test-mode delivery, and ingress checks pass.
 
-## Architecture
-- Ingress: Pinning configured for `/api/v1/checkout` and `/api/v1/webhook/stripe`.
-- Identity Guards: Middleware applied to verify user context before interacting with Stripe.
-- Webhooks: Stripe events (`checkout.session.completed`) trigger database state updates.
+## Ingress and routes
+- The Node server defaults to `127.0.0.1:3001`; terminate TLS at a trusted ingress and block direct public access to Node. Set `TRUSTED_PROXY_IP` to the verified socket peer of that ingress. The ingress must overwrite (not append or preserve) `CF-Connecting-IP`. Test spoofed, duplicate, malformed and absent headers before release.
+- User routes: `POST /v1/convert`, `GET /v1/quota`, `POST /v1/checkout`, `GET /v1/checkout-status?session_id=...`, `POST /v1/redeem`. User POSTs require an exact `Origin` matching `PUBLIC_BASE_URL`; identity is a signed `HttpOnly; Secure; SameSite=Lax` cookie. Do not redirect or rewrite the paths without an explicit tested mapping.
+- Stripe webhook: `POST /v1/stripe/webhook`; it must receive the unmodified raw request body and `Stripe-Signature` header. It intentionally has no browser cookie/Origin requirement. Configure and verify the Stripe endpoint/events in test mode first; a webhook signature is required before DB/provider side effects.
 
-## Environment Setup
-Required in `~/.hermes/.env` (or project `.env`):
-- `STRIPE_SECRET_KEY`
-- `STRIPE_WEBHOOK_SECRET`
-- `DB_CONNECTION_STRING`
+## App-only configuration
+The Node process reads its environment; it does NOT automatically load `~/.hermes/.env` or an arbitrary project `.env`. Supply a private app-only environment via the deployment supervisor/secret manager; never mount `/opt/paygate/.env` (it contains the DB superuser password), and never commit secrets. The startup requires `API_TOKEN`, `PAYGATE_DATABASE_URL` (user `paygate_pdf2md`, database `paygate`), `PAYGATE_IP_SECRET`, `PAYGATE_CODE_SECRET`, `PAYGATE_COOKIE_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `PUBLIC_BASE_URL` (HTTPS origin), and `TRUSTED_PROXY_IP`. Optional: `API_URL`, `HOST`, `PORT`. The three independent paygate secrets must be random and distinct. Verify the DB role and seeded price/product with the same Stripe mode used by Checkout; no live charges during setup.
 
-## SQL Migrations
-Apply in order:
-1. `sql/020_checkout_status.sql`
-2. `sql/025_pdf2md_guards.sql`
+## SQL operator gates
+On an operator-approved disposable `paygate-db`, apply the handoff's base schema and `pdf2md` seed, then `pdf_to_markdown/sql/020_checkout_status.sql` and `pdf_to_markdown/sql/025_pdf2md_guards.sql` in that order. Run `920_checkout_status_test.sql` and `925_pdf2md_guards_test.sql` with `psql -v ON_ERROR_STOP=1` and confirm their actual notices and rollback, then a separate two-session same-PI fulfillment/reversal race. The scripts have NOT been run on this host. Set the dedicated DB role password out of band; never copy a `paygate_app` or superuser URL into the PDF app. Review the generic quota/consume grants: they accept an app ID and could touch other apps if this role's credentials are compromised. Restrict deployment and approve that residual risk or introduce reviewed app-scoped wrappers before release.
 
 ## Maintenance
-- Operator must audit failed payments daily.
-- No live DB/Stripe interactions performed.
+Investigate Stripe delivery retries, refund/dispute mismatches, and coded anomalies; keep personal data out of alerts.
 
 ## Recovery secret and reversal monitoring
 - `PAYGATE_CODE_SECRET` (the configured code secret) deterministically derives restore codes from Checkout session IDs. Keep it in the secret manager, not logs, Git or database; retain protected historical versions and backups for the lifetime of redeemable passes. Rotating or losing it without a migration/recovery plan changes the derived code and can prevent existing buyers from recovering/redeeming their passes. Plan rotation with an expiry/compatibility window and a verified customer recovery procedure; restrict and audit access to old versions.
