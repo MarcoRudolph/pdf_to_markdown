@@ -5,7 +5,7 @@ const { createServer } = require('./server.cjs');
 
 function listen(server) { return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port))); }
 async function request(port, body, contentType = 'multipart/form-data; boundary=x') {
-  const response = await fetch(`http://127.0.0.1:${port}/v1/convert`, { method: 'POST', headers: { 'content-type': contentType }, body });
+  const response = await fetch(`http://127.0.0.1:${port}/v1/convert`, { method: 'POST', headers: { 'content-type': contentType, origin: 'http://localhost:3000' }, body });
   return { status: response.status, body: await response.text(), disposition: response.headers.get('content-disposition') };
 }
 
@@ -22,7 +22,9 @@ test('proxy forwards body with server-only bearer, returns markdown, redacts fai
     });
   });
   const upstreamPort = await listen(upstream);
-  const server = createServer({ token: 'private-only', apiUrl: `http://127.0.0.1:${upstreamPort}`, buildDir: __dirname, testMode: true });
+  const server = createServer({ token: 'private-only', apiUrl: `http://127.0.0.1:${upstreamPort}`, buildDir: __dirname,
+    testMode: true, publicBaseUrl: 'https://pdf.example.test', testCraOrigin: 'http://localhost:3000',
+    cookieSecret: 'test-cookie-secret-which-is-never-live', trustedProxyIp: '192.0.2.8' });
   const port = await listen(server);
   try {
     let result = await request(port, 'PDF contents');

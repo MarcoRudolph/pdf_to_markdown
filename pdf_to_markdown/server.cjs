@@ -5,13 +5,18 @@ const path = require('node:path');
 const { URL } = require('node:url');
 const { isIP } = require('node:net');
 const { createPaygate } = require('./paygate.cjs');
+const { identityFor } = require('./identity.cjs');
 
 const MAX_REQUEST = 10485760 + 65536; // PDF limit plus multipart headers/boundary.
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.ico': 'image/x-icon', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8' };
 
-function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false }) {
+function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false, testHandlers, testCraOrigin }) {
   if (!token) throw new Error('API_TOKEN must be set on the server');
   if (!paygate && !testMode) throw new Error('paygate required outside explicit test mode');
+  if (!testMode && (testHandlers || testCraOrigin)) throw new Error('Test-only route/origin override refused');
+  if (!publicBaseUrl || !cookieSecret || !isIP(trustedProxyIp)) throw new Error('PUBLIC_BASE_URL, PAYGATE_COOKIE_SECRET and TRUSTED_PROXY_IP required');
+  const allowedOrigin = new URL(publicBaseUrl).origin;
+  if (testCraOrigin && new URL(testCraOrigin).origin !== testCraOrigin) throw new Error('Invalid test CRA Origin');
   const upstream = new URL(apiUrl);
   if (!['http:', 'https:'].includes(upstream.protocol) || upstream.username || upstream.password || upstream.pathname !== '/') throw new Error('Invalid API_URL');
   const client = upstream.protocol === 'https:' ? require('node:https') : http;
@@ -21,6 +26,27 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl,
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'");
     function reject(status, message) { if (!res.headersSent) { res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' }); res.end(message); } }
     const pathname = new URL(req.url, 'http://localhost').pathname;
+    const protectedPost = ['/v1/convert', '/v1/checkout', '/v1/redeem'];
+    const protectedGet = ['/v1/quota', '/v1/checkout-status'];
+    if ((req.method === 'POST' && protectedPost.includes(pathname)) || (req.method === 'GET' && protectedGet.includes(pathname))) {
+      if (req.method === 'POST') {
+        const origins = req.headersDistinct?.origin;
+        let valid = false;
+        if (origins?.length === 1) {
+          try {
+            const origin = new URL(origins[0]);
+            valid = origins[0] === origin.origin && (origin.origin === allowedOrigin || (testMode && origin.origin === testCraOrigin));
+          } catch { /* invalid, null, or malformed Origin */ }
+        }
+        if (!valid) return reject(403, 'Forbidden');
+      }
+      // No live route yet for Task 3/4: only explicit test-mode handlers exercise this common guard.
+      if (pathname !== '/v1/convert' && !(testMode && testHandlers?.[pathname])) return reject(405, 'Method not allowed');
+      let identity;
+      try { identity = identityFor(req, res, { cookieSecret, trustedProxyIp }); }
+      catch { return reject(503, 'Client IP unavailable'); }
+      if (testMode && testHandlers?.[pathname]) return testHandlers[pathname](req, res, identity);
+    }
     if (pathname === '/v1/convert') {
       if (req.method !== 'POST') return reject(405, 'Method not allowed');
       // Task 3 wires reservations; never expose an unmetered production path.

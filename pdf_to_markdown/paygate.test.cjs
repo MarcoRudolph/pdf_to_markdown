@@ -149,10 +149,11 @@ test('server cannot run without paygate outside explicit test mode', () => {
 });
 
 test('production adapter refuses conversion until quota routing is installed', async () => {
-  const server = require('./server.cjs').createServer({ token: 'token', apiUrl: 'http://127.0.0.1:8000', buildDir: __dirname, paygate: {} });
+  const server = require('./server.cjs').createServer({ token: 'token', apiUrl: 'http://127.0.0.1:8000', buildDir: __dirname, paygate: {},
+    publicBaseUrl: 'https://pdf.example.test', cookieSecret: 'test-cookie-secret-only', trustedProxyIp: '192.0.2.8' });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
-    const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/convert`, { method: 'POST', headers: { 'content-type': 'multipart/form-data; boundary=x' }, body: 'PDF' });
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/convert`, { method: 'POST', headers: { 'content-type': 'multipart/form-data; boundary=x', origin: 'https://pdf.example.test' }, body: 'PDF' });
     assert.equal(response.status, 503);
   } finally { server.close(); }
 });
