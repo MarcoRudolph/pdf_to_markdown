@@ -23,9 +23,11 @@ npm run build
 API_URL=http://127.0.0.1:8000 PORT=3001 npm run serve
 ```
 
-Der Token muss in diesem zweiten Terminal ebenfalls als `API_TOKEN` exportiert werden (z. B. über einen lokalen Secret-Manager); der Platzhalter darf nicht im Repository oder in der Shell-History landen.
+Der Token muss in diesem zweiten Terminal ebenfalls als `API_TOKEN` exportiert werden (z. B. über einen lokalen Secret-Manager); der Platzhalter darf nicht im Repository oder in der Shell-History landen. Das oben gezeigte Startbeispiel allein reicht seit Task 1 nicht mehr: Paygate-Konfiguration und eine erreichbare Datenbank sind zusätzlich Pflicht (siehe unten).
 
 `http://127.0.0.1:3001/` aus dem Browser aufrufen. Für die Entwicklung optional `npm start` auf Port 3000; CRA leitet `/v1/convert` an den Node-Proxy auf Port 3001 weiter. **Nie** den Token in `REACT_APP_*`, Frontend-Dateien, öffentlichen Environments oder URL-Parametern setzen. `API_URL` ist ausschließlich eine Server-Einstellung. Node verweigert den Start ohne Token. `HOST` ist standardmäßig `127.0.0.1` (kein öffentlicher Dienst).
+
+**Paygate-Zwischenstand (Task 1):** `npm run serve` verlangt jetzt zusätzlich `PAYGATE_DATABASE_URL` (Loginrolle `paygate_pdf2md`), `PAYGATE_IP_SECRET`, `PAYGATE_CODE_SECRET`, `PAYGATE_COOKIE_SECRET` (drei unabhängig erzeugte Geheimnisse von mindestens 32 zufälligen Bytes), `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `PUBLIC_BASE_URL` (HTTPS), `TRUSTED_PROXY_IP`. Der Start prüft die Rolle und die aktive `pdf2md`/`pass50`-Konfiguration in der Datenbank und verweigert Abweichungen. Der App-Dienst darf **nur** seine eigene Secret-Datei (Modus 600 in Verzeichnis Modus 700) lesen; niemals `/opt/paygate/.env`, da dort `POSTGRES_PASSWORD` liegt. Credentials nicht in Git oder Logs ablegen. Für den Testproxy ohne Paygate ist ausschließlich der explizite `testMode` der injizierten `createServer`-API vorgesehen, nicht der Produktionseinstieg. Uploads werden mit Paygate-Adapter bis zur Implementierung der Quota-Routen in Task 3 mit HTTP 503 gesperrt. Es gibt keinen unmetered Produktions-Fallback. Die Datenbank und dedizierte Rolle müssen separat bereitgestellt werden.
 
 ## Tests
 

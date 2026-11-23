@@ -22,7 +22,7 @@ test('proxy forwards body with server-only bearer, returns markdown, redacts fai
     });
   });
   const upstreamPort = await listen(upstream);
-  const server = createServer({ token: 'private-only', apiUrl: `http://127.0.0.1:${upstreamPort}`, buildDir: __dirname });
+  const server = createServer({ token: 'private-only', apiUrl: `http://127.0.0.1:${upstreamPort}`, buildDir: __dirname, testMode: true });
   const port = await listen(server);
   try {
     let result = await request(port, 'PDF contents');
