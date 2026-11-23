@@ -5,13 +5,14 @@ const path = require('node:path');
 const { URL } = require('node:url');
 const { isIP } = require('node:net');
 const { createPaygate } = require('./paygate.cjs');
+const { createPayments } = require('./payments.cjs');
 const { identityFor } = require('./identity.cjs');
 const { randomBytes } = require('node:crypto');
 const { parsePdf, LIMIT } = require('./upload.cjs');
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.ico': 'image/x-icon', '.png': 'image/png', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8' };
 
-function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false, testHandlers, testCraOrigin }) {
+function createServer({ token, apiUrl, buildDir, paygate, stripe, stripePriceId, publicBaseUrl, ipSecret, codeSecret, cookieSecret, trustedProxyIp, testMode = false, testHandlers, testCraOrigin }) {
   if (!token) throw new Error('API_TOKEN must be set on the server');
   try { http.validateHeaderValue('authorization', `Bearer ${token}`); }
   catch { throw new Error('Invalid API_TOKEN'); }
@@ -23,6 +24,35 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl,
   const upstream = new URL(apiUrl);
   if (!['http:', 'https:'].includes(upstream.protocol) || upstream.username || upstream.password || upstream.pathname !== '/') throw new Error('Invalid API_URL');
   const client = upstream.protocol === 'https:' ? require('node:https') : http;
+  const payments = stripe && paygate && stripePriceId && codeSecret
+    ? createPayments({ stripe, paygate, stripePriceId, publicBaseUrl, codeSecret }) : null;
+  // Single-process limiter; a shared store is mandatory before multiple workers.
+  const paymentHits = new Map();
+  function admitted(kind, identity) {
+    const now = Date.now(), max = kind === 'checkout' ? 10 : 20;
+    for (const key of [kind + ':subject:' + identity.subjectHash, kind + ':ip:' + identity.clientIp]) {
+      const entry = paymentHits.get(key);
+      if (entry && now - entry.start < 60000 && entry.count >= max) return false;
+    }
+    for (const key of [kind + ':subject:' + identity.subjectHash, kind + ':ip:' + identity.clientIp]) {
+      const entry = paymentHits.get(key);
+      paymentHits.set(key, entry && now - entry.start < 60000 ? { ...entry, count: entry.count + 1 } : { start: now, count: 1 });
+    }
+    if (paymentHits.size > 10000) for (const [key, entry] of paymentHits) if (now - entry.start >= 60000) paymentHits.delete(key);
+    return true;
+  }
+  async function jsonBody(req) {
+    let size = 0, chunks = [];
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > 1024) throw new Error('Invalid body');
+      chunks.push(chunk);
+    }
+    if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) throw new Error('Invalid body');
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Invalid body');
+    return body;
+  }
   let activeUploads = 0;
   async function convert(req, res, identity) {
     const reject = (status, message, json = false) => {
@@ -150,11 +180,40 @@ function createServer({ token, apiUrl, buildDir, paygate, stripe, publicBaseUrl,
         }
         if (!valid) return reject(403, 'Forbidden');
       }
-      if (!['/v1/convert', '/v1/quota'].includes(pathname) && !(testMode && testHandlers?.[pathname])) return reject(405, 'Method not allowed');
+      if (!['/v1/convert', '/v1/quota', '/v1/checkout', '/v1/checkout-status', '/v1/redeem'].includes(pathname) && !(testMode && testHandlers?.[pathname])) return reject(405, 'Method not allowed');
       let identity;
       try { identity = identityFor(req, res, { cookieSecret, trustedProxyIp }); }
       catch { return reject(503, 'Client IP unavailable'); }
       if (testMode && testHandlers?.[pathname]) return testHandlers[pathname](req, res, identity);
+      if (['/v1/checkout', '/v1/checkout-status', '/v1/redeem'].includes(pathname)) {
+        if (!payments) return reject(503, 'Payments unavailable');
+        const kind = pathname.slice(4);
+        if (!admitted(kind, identity)) {
+          res.setHeader('Retry-After', '60');
+          return reject(429, 'Too many requests');
+        }
+        (async () => {
+          let result;
+          if (pathname === '/v1/checkout-status') {
+            const url = new URL(req.url, 'http://localhost');
+            const refs = url.searchParams.getAll('session_id');
+            if (refs.length !== 1 || !/^cs_[A-Za-z0-9_]{1,120}$/.test(refs[0]) || [...url.searchParams.keys()].some(key => key !== 'session_id')) throw Object.assign(new Error('Invalid request'), { status: 400 });
+            result = await payments.status(refs[0], identity.subjectHash);
+          } else {
+            let body;
+            try { body = await jsonBody(req); } catch { throw Object.assign(new Error('Invalid request'), { status: 400 }); }
+            if (pathname === '/v1/checkout') {
+              if (Object.keys(body).length) throw Object.assign(new Error('Invalid request'), { status: 400 });
+              result = await payments.checkout(identity.subjectHash);
+            } else {
+              if (Object.keys(body).length !== 1 || typeof body.code !== 'string' || !body.code || body.code.length > 128) throw Object.assign(new Error('Invalid request'), { status: 400 });
+              result = await payments.redeem(body.code, identity.subjectHash);
+            }
+          }
+          if (!res.destroyed) { res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(result)); }
+        })().catch(error => { if (!res.destroyed) reject(error.status === 400 ? 400 : 503, error.status === 400 ? 'Invalid request' : 'Payments unavailable'); });
+        return;
+      }
       if (pathname === '/v1/quota') {
         if (!paygate) return reject(503, 'Quota unavailable');
         paygate.quota(identity.subjectHash, identity.clientIp).then(quota => {
@@ -242,7 +301,7 @@ async function createConfiguredServer(env, { paygateFactory = createPaygate, str
     }
     const stripe = stripeFactory(env.STRIPE_SECRET_KEY);
     return createServer({ token: env.API_TOKEN, apiUrl: env.API_URL || 'http://127.0.0.1:8000', buildDir: path.join(__dirname, 'build'),
-      paygate, stripe, publicBaseUrl: env.PUBLIC_BASE_URL, ipSecret: env.PAYGATE_IP_SECRET,
+      paygate, stripe, stripePriceId: env.STRIPE_PRICE_ID, publicBaseUrl: env.PUBLIC_BASE_URL, ipSecret: env.PAYGATE_IP_SECRET,
       codeSecret: env.PAYGATE_CODE_SECRET, cookieSecret: env.PAYGATE_COOKIE_SECRET, trustedProxyIp: env.TRUSTED_PROXY_IP });
   } catch (error) {
     await paygate.close();
